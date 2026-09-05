@@ -1,0 +1,10 @@
+This directory is populated by cmd/stagebuild at build time with one app's
+rigger.exe, unins.exe, jre-archive.zip, manifest.json, appconfig.json,
+app.ico, license.txt, and build.json — cmd/installer's //go:embed all:payload
+directive embeds whatever is here when `go build ./cmd/installer` runs.
+
+This placeholder file exists only so a fresh checkout (before stagebuild has
+ever run) still has something for go:embed to match — it fails to compile
+against a missing or empty directory. It is not embedded into any real
+installer output; stagebuild wipes this directory's generated contents back
+down to just this file after a successful build.

@@ -1,0 +1,24 @@
+{
+  "appId": "ABC",
+  "appName": "ABC",
+  "publisher": "Acme Corp",
+  "protocolScheme": "acme-abc",
+  "iconPath": "app.ico",
+  "licensePath": "LICENSE.txt",
+  "environments": {
+    "PROD": {
+      "zones": {
+        "Internet": {
+          "manifestPath": "manifest.generated.json",
+          "manifestServerUrl": "http://127.0.0.1:8080/abc/manifest.json"
+        }
+      }
+    }
+  },
+  "initialJre": {
+    "version": "__JRE_VERSION__",
+    "archivePath": "jre-archive.zip",
+    "sha256": "__JRE_SHA256__"
+  },
+  "outputName": "ABCSetup.exe"
+}

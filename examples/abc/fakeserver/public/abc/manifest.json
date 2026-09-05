@@ -1,0 +1,28 @@
+{
+  "appId": "ABC",
+  "appName": "ABC",
+  "version": "1.0.0",
+  "environment": "PROD",
+  "manifestServerUrl": "http://127.0.0.1:8080/abc/manifest.json",
+  "runtime": {
+    "javaVersion": "__JAVA_VERSION__",
+    "path": "jre/__JAVA_VERSION__"
+  },
+  "classpath": ["1.0.0/app.jar"],
+  "mainClass": "com.example.abc.Main",
+  "jvmOptions": [
+    "-Dabc.env=${environment}",
+    "-Dabc.token=${uri.token}",
+    "-Dabc.zone=${networkZone}",
+    "-Dabc.proxyHost=${proxyHost}",
+    "-Dabc.proxyPort=${proxyPort}"
+  ],
+  "arguments": ["--env", "${environment}", "--install-dir", "${installDir}", "--data-dir", "${dataDir}"],
+  "protocolParams": ["token"],
+  "shortcut": {
+    "name": "ABC",
+    "description": "Launches ABC (fixture)",
+    "startMenu": true,
+    "desktop": true
+  }
+}

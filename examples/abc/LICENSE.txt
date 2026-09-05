@@ -1,0 +1,6 @@
+ABC Fixture App — Placeholder License
+
+This is a placeholder license for the ABC fixture app used to develop and
+test Stage. It is not a real license and grants no rights to anything.
+
+Copyright (c) Acme Corp. All rights reserved.
