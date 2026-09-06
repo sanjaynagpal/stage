@@ -2,13 +2,17 @@
 # rigger.exe can be manually tested end to end, standing in for the
 # installer/stagebuild that don't exist yet (docs/REQUIREMENTS.md §16).
 #
-# Concretely this: builds rigger.exe, builds the ABC fixture jar, copies the
-# local JDK (from JAVA_HOME) into jre/<version>, substitutes that version
-# into the fixture manifest, writes it both as the install's local cache and
-# as the copy fakeserver serves, and writes the HKCU\Software\ABC registry
-# values Rigger reads (internal/winreg.AppValues) — everything a real
-# installer would do, minus registering shortcuts/protocol handler/uninstall
-# key, which aren't needed to launch rigger.exe directly for a test.
+# Concretely this: builds rigger.exe, builds the ABC fixture jar and zips it
+# into an artifacts archive served by fakeserver (deliberately NOT copied
+# into the install's version directory — the whole point is to exercise
+# Rigger's on-demand jar fetch, internal/jarprovision, on first launch,
+# docs/REQUIREMENTS.md §9), copies the local JDK (from JAVA_HOME) into
+# jre/<version>, substitutes that version/checksum into the fixture
+# manifest, writes it both as the install's local cache and as the copy
+# fakeserver serves, and writes the HKCU\Software\ABC registry values Rigger
+# reads (internal/winreg.AppValues) — everything a real installer would do,
+# minus registering shortcuts/protocol handler/uninstall key, which aren't
+# needed to launch rigger.exe directly for a test.
 #
 # Run once, then see the printed instructions to start fakeserver and
 # launch rigger.exe.
@@ -49,9 +53,18 @@ try {
 Write-Host "`nBuilding the ABC fixture app..."
 & (Join-Path $abcDir "java/build.ps1")
 
-$versionDir = Join-Path $installRoot "1.0.0"
-New-Item -ItemType Directory -Force -Path $versionDir | Out-Null
-Copy-Item -Force (Join-Path $abcDir "java/target/app.jar") (Join-Path $versionDir "app.jar")
+Write-Host "`nZipping app.jar into an artifacts archive for fakeserver to serve..."
+$artifactsDir = Join-Path $abcDir "fakeserver/served/abc/artifacts"
+New-Item -ItemType Directory -Force -Path $artifactsDir | Out-Null
+$artifactZipPath = Join-Path $artifactsDir "1.0.0.zip"
+if (Test-Path $artifactZipPath) { Remove-Item $artifactZipPath -Force }
+Compress-Archive -Path (Join-Path $abcDir "java/target/app.jar") -DestinationPath $artifactZipPath -CompressionLevel Optimal
+$artifactSha256 = (Get-FileHash -Path $artifactZipPath -Algorithm SHA256).Hash.ToLower()
+Write-Host "Artifact SHA256: $artifactSha256"
+
+# Deliberately not pre-populating $installRoot\1.0.0 with app.jar here: the
+# absence is what makes the first launch exercise Rigger's on-demand jar
+# fetch against the archive just written above.
 
 $jreDir = Join-Path $installRoot "jre/$javaVersion"
 if (-not (Test-Path $jreDir)) {
@@ -64,7 +77,7 @@ if (-not (Test-Path $jreDir)) {
 
 Write-Host "`nWriting manifest.json (local cache + fakeserver-served copy)..."
 $template = Get-Content (Join-Path $abcDir "fakeserver/public/abc/manifest.json") -Raw
-$substituted = $template.Replace("__JAVA_VERSION__", $javaVersion)
+$substituted = $template.Replace("__JAVA_VERSION__", $javaVersion).Replace("__ARTIFACT_SHA256__", $artifactSha256)
 Set-Content -Path (Join-Path $installRoot "manifest.json") -Value $substituted -NoNewline
 
 $servedDir = Join-Path $abcDir "fakeserver/served/abc"
@@ -93,7 +106,8 @@ Write-Host "`nDone. Install root: $installRoot`n"
 Write-Host "Next steps:"
 Write-Host "  1. Start fakeserver (separate shell):"
 Write-Host "       go run ./examples/abc/fakeserver -dir examples/abc/fakeserver/served"
-Write-Host "  2. Launch via shortcut path:"
+Write-Host "  2. Launch via shortcut path (first launch fetches and unpacks the app-jars"
+Write-Host "     archive on demand, since $installRoot\1.0.0 doesn't exist yet):"
 Write-Host "       & '$installRoot\rigger.exe'"
 Write-Host "  3. Launch via protocol-handler path (token gets injected as -Dabc.token):"
 Write-Host "       & '$installRoot\rigger.exe' '${protocolScheme}://launch?token=demo123'"

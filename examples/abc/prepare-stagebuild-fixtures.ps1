@@ -1,9 +1,12 @@
 # Prepares real fixtures for testing cmd/stagebuild end to end: zips the
-# local JDK (from JAVA_HOME) into a JRE archive, computes its checksum, and
-# writes resolved (placeholder-substituted) copies of the manifest and
-# appconfig templates stagebuild consumes. All generated files are
-# gitignored (large/machine-specific); rerun this whenever JAVA_HOME
-# changes.
+# local JDK (from JAVA_HOME) into a JRE archive, computes its checksum,
+# builds the ABC fixture jar and zips it into the artifacts archive
+# fakeserver serves for Rigger's on-demand jar fetch (internal/jarprovision,
+# docs/REQUIREMENTS.md §9 — the gap that used to make a real install's
+# "Launch now" fail), and writes resolved (placeholder-substituted) copies
+# of the manifest and appconfig templates stagebuild consumes. All generated
+# files are gitignored (large/machine-specific); rerun this whenever
+# JAVA_HOME changes.
 $ErrorActionPreference = "Stop"
 
 $abcDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -30,15 +33,34 @@ Compress-Archive -Path (Join-Path $env:JAVA_HOME "*") -DestinationPath $zipPath 
 $sha256 = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
 Write-Host "SHA256: $sha256"
 
+Write-Host "`nBuilding the ABC fixture app..."
+& (Join-Path $abcDir "java/build.ps1")
+
+Write-Host "`nZipping app.jar into the artifacts archive fakeserver will serve..."
+$artifactsDir = Join-Path $abcDir "fakeserver/served/abc/artifacts"
+New-Item -ItemType Directory -Force -Path $artifactsDir | Out-Null
+$artifactZipPath = Join-Path $artifactsDir "1.0.0.zip"
+if (Test-Path $artifactZipPath) { Remove-Item $artifactZipPath -Force }
+Compress-Archive -Path (Join-Path $abcDir "java/target/app.jar") -DestinationPath $artifactZipPath -CompressionLevel Optimal
+$artifactSha256 = (Get-FileHash -Path $artifactZipPath -Algorithm SHA256).Hash.ToLower()
+Write-Host "Artifact SHA256: $artifactSha256"
+
 Write-Host "`nWriting manifest.generated.json..."
 $manifestTemplate = Get-Content (Join-Path $abcDir "fakeserver/public/abc/manifest.json") -Raw
-$manifestResolved = $manifestTemplate.Replace("__JAVA_VERSION__", $javaVersion)
+$manifestResolved = $manifestTemplate.Replace("__JAVA_VERSION__", $javaVersion).Replace("__ARTIFACT_SHA256__", $artifactSha256)
 Set-Content -Path (Join-Path $abcDir "manifest.generated.json") -Value $manifestResolved -NoNewline
+
+Write-Host "`nWriting fakeserver-served copy of the manifest..."
+$servedDir = Join-Path $abcDir "fakeserver/served/abc"
+New-Item -ItemType Directory -Force -Path $servedDir | Out-Null
+Set-Content -Path (Join-Path $servedDir "manifest.json") -Value $manifestResolved -NoNewline
 
 Write-Host "Writing appconfig.generated.json..."
 $appconfigTemplate = Get-Content (Join-Path $abcDir "appconfig.json") -Raw
 $appconfigResolved = $appconfigTemplate.Replace("__JRE_VERSION__", $javaVersion).Replace("__JRE_SHA256__", $sha256)
 Set-Content -Path (Join-Path $abcDir "appconfig.generated.json") -Value $appconfigResolved -NoNewline
 
-Write-Host "`nDone. Next step:"
-Write-Host "  go run ./cmd/stagebuild -config examples/abc/appconfig.generated.json -env PROD -zone Internet"
+Write-Host "`nDone. Next steps:"
+Write-Host "  1. go run ./cmd/stagebuild -config examples/abc/appconfig.generated.json -env PROD -zone Internet"
+Write-Host "  2. Before testing 'Launch now', start fakeserver so Rigger can fetch the app jars:"
+Write-Host "       go run ./examples/abc/fakeserver -dir examples/abc/fakeserver/served"

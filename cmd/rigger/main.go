@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sanjaynagpal/stage/internal/applog"
+	"github.com/sanjaynagpal/stage/internal/jarprovision"
 	"github.com/sanjaynagpal/stage/internal/javainvoke"
 	"github.com/sanjaynagpal/stage/internal/layout"
 	"github.com/sanjaynagpal/stage/internal/manifest"
@@ -92,6 +93,16 @@ func run() (err error) {
 		return fmt.Errorf("required Java runtime %s is not installed at %s — reinstall or upgrade %s to fix this", m.Runtime.JavaVersion, jreDir, appID)
 	}
 	logger.Info("rigger: using Java %s at %s", m.Runtime.JavaVersion, jreDir)
+
+	versionDir := layout.VersionDir(root, m.Version)
+	if _, err := os.Stat(versionDir); err != nil {
+		artifactURL := m.ArtifactDownloadURL()
+		logger.Info("rigger: application version %s not found locally at %s — fetching from %s", m.Version, versionDir, artifactURL)
+		if err := jarprovision.Provision(client, root, artifactURL, m.ArtifactSHA256, versionDir); err != nil {
+			return fmt.Errorf("rigger: could not fetch application version %s: %w", m.Version, err)
+		}
+		logger.Info("rigger: fetched and installed application version %s", m.Version)
+	}
 
 	classpath, err := javainvoke.ResolveClasspath(root, m.Classpath)
 	if err != nil {

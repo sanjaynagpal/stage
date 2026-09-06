@@ -47,7 +47,8 @@ ABC/                            (root app folder — %LocalAppData%\ABC or %Prog
 
 Notes / assumptions to confirm:
 - At most **2** JRE versions retained at once; oldest/unused evicted on install of a 3rd.
-- Multiple **version** folders (app artifacts) can coexist; retention policy TBD (§9).
+- Multiple **version** folders (app artifacts) can coexist; retention policy resolved in §21 —
+  at most **2** retained at once, mirroring the JRE policy above.
 - Java version + location is **always relative to the root app folder** (per requirement),
   e.g. manifest says `jre/21.0.2+13` rather than an absolute path — this makes the whole
   `ABC` folder relocatable/xcopy-safe.
@@ -543,3 +544,35 @@ Requirements as specified by the operator:
   unimplemented `TODO(Phase 8)` stub (§12-14), it's undecided whether doctor mode's WebView2
   instance and provisioning's progress WebView2 instance are literally the same reusable
   component/window, or two separate uses of the same underlying technology.
+
+## 21. Decisions (Round 10 — app-jar delivery & version retention) — CONFIRMED
+
+Closes the retention-policy question §3 left open ("multiple version folders can coexist;
+retention policy TBD") and implements the jar-delivery mechanism §9 already decided on
+(Rigger fetches jars from `ManifestServerUrl`, never bundled by Stage).
+
+- **Retention policy**: app-version folders directly under the install root follow the **same
+  `MaxRetainedVersions=2`, keep-newest-by-modification-time policy already used for JRE versions**
+  under `jre/` (§3) — evicted immediately after a successful fetch of a newer version, not on a
+  delay or separate sweep. Chosen for consistency with the already-shipped JRE precedent rather
+  than inventing a second policy; revisit only if a real deployment needs rollback further back
+  than one version.
+- **Fetch trigger**: on-demand, not eager — Rigger fetches a version's jars only when
+  `layout.VersionDir(root, m.Version)` doesn't already exist on disk (first launch, or the
+  manifest polled a newer `version` than what's currently unpacked). This mirrors the JRE-missing
+  check already in `cmd/rigger` rather than re-fetching/re-extracting unchanged jars on every
+  launch, which would also risk clobbering files a still-running JVM has open.
+- **Download convention**: `Manifest.ArtifactDownloadURL()` derives the archive location from
+  `ManifestServerUrl` by the same convention as `Manifest.DownloadURL()` for JRE archives — the
+  manifest's own final path segment replaced with `artifacts/<version>.zip`.
+- **Checksum**: a new manifest field, `artifactSha256`, verifies the downloaded archive — the
+  app-level analogue of `runtime.sha256`, with the same looseness (documented as required for
+  on-demand delivery, not enforced by `Manifest.Validate()`, matching how `runtime.sha256` is
+  already handled).
+- **Package-mode independence**: this fetch runs unconditionally, regardless of `PackageMode` —
+  it is the always-on jars/manifest channel from §9b/§13-14, not the Static/Dynamic-gated
+  rigger.exe/JRE self-update channel.
+- **Proxy routing**: routed through the same `proxydetect`-aware `*http.Client` `cmd/rigger`
+  already builds for the manifest refresh (§17-18), not a bare client — a live per-launch network
+  call from an ordinary user session has the same proxy-correctness requirement as the manifest
+  fetch does.

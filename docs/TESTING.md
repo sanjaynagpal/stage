@@ -42,10 +42,12 @@ From the repo root:
 .\examples\abc\setup-dev-install.ps1
 ```
 
-This builds `rigger.exe`, builds the fixture app's jar, copies your local JDK in as the "bundled"
-JRE, writes the manifest (local cache + fakeserver-served copy), and writes the
-`HKCU:\Software\ABC` registry values — everything a real installer would do for this purpose. It
-prints the exact follow-up commands, ending in something like:
+This builds `rigger.exe`, builds the fixture app's jar and zips it into the artifacts archive
+fakeserver serves (deliberately *not* also copied into the install's version directory — see
+below), copies your local JDK in as the "bundled" JRE, writes the manifest (local cache +
+fakeserver-served copy), and writes the `HKCU:\Software\ABC` registry values — everything a real
+installer would do for this purpose. It prints the exact follow-up commands, ending in something
+like:
 
 ```
 Done. Install root: C:\Users\<you>\AppData\Local\ABC
@@ -81,11 +83,15 @@ fetches happen live.
 ```powershell
 & "$env:LocalAppData\ABC\rigger.exe"
 ```
-Expect console output like:
+The install's `1.0.0` version directory doesn't exist yet (`setup-dev-install.ps1` deliberately
+didn't create it — see §2.1), so this first launch also exercises the on-demand jar fetch
+(`internal/jarprovision`). Expect console output like:
 ```
 rigger: launching ABC v1.0.0 (invoked via shortcut)
 rigger: loaded manifest v1.0.0 (fresh fetch from http://127.0.0.1:8080/abc/manifest.json)
 rigger: using Java 25.0.1 at C:\Users\<you>\AppData\Local\ABC\jre\25.0.1
+rigger: application version 1.0.0 not found locally at C:\Users\<you>\AppData\Local\ABC\1.0.0 — fetching from http://127.0.0.1:8080/abc/artifacts/1.0.0.zip
+rigger: fetched and installed application version 1.0.0
 rigger: launching ABC 1.0.0 (mainClass=com.example.abc.Main)
 ```
 ...and a Swing dialog from the ABC fixture app should appear, reporting the args/system
@@ -94,6 +100,15 @@ launch (there's no supervision — Rigger execs and exits, so nothing does this 
 ```powershell
 Get-Process javaw | Stop-Process -Force
 ```
+Launch a second time and confirm the fetch lines are gone — `1.0.0` now exists on disk, so
+Rigger launches straight from it. To re-test the fetch path, delete
+`$env:LocalAppData\ABC\1.0.0` and launch again.
+
+**Jar-fetch checksum mismatch** (to see the archive get rejected): after deleting `1.0.0` as
+above, edit `examples/abc/fakeserver/served/abc/manifest.json`'s `artifactSha256` to any other
+64-hex-char value, then launch. Expect a fatal error naming the checksum mismatch, and confirm
+`1.0.0` was not created. Restore the correct checksum afterward (rerun
+`setup-dev-install.ps1`, which recomputes and rewrites it).
 
 **Protocol-handler path** (simulates the browser-based auth redirect, §11):
 ```powershell

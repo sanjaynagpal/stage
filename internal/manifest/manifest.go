@@ -38,6 +38,11 @@ type Manifest struct {
 	Version           string      `json:"version"`
 	Environment       Environment `json:"environment"`
 	ManifestServerURL string      `json:"manifestServerUrl"`
+	// ArtifactSHA256 verifies the app-jars archive Rigger fetches on demand
+	// when the version directory named by Version isn't present on disk yet
+	// (internal/jarprovision) — the app-level analogue of Runtime.SHA256.
+	// Required whenever on-demand jar delivery is possible (docs/REQUIREMENTS.md §9).
+	ArtifactSHA256 string `json:"artifactSha256,omitempty"`
 	Runtime           RuntimeSpec `json:"runtime"`
 	Classpath         []string    `json:"classpath"`
 	MainClass         string      `json:"mainClass"`
@@ -298,4 +303,13 @@ func resolveToken(tok string, ctx PlaceholderContext) (string, bool) {
 func (m *Manifest) DownloadURL() string {
 	base := m.ManifestServerURL[:strings.LastIndex(m.ManifestServerURL, "/")+1]
 	return base + "jre/" + m.Runtime.JavaVersion + "-win-x64.zip"
+}
+
+// ArtifactDownloadURL derives the on-demand app-jars archive location from
+// ManifestServerURL by the same convention as DownloadURL: the manifest's
+// own final path segment is replaced with "artifacts/<version>.zip"
+// (docs/REQUIREMENTS.md §9).
+func (m *Manifest) ArtifactDownloadURL() string {
+	base := m.ManifestServerURL[:strings.LastIndex(m.ManifestServerURL, "/")+1]
+	return base + "artifacts/" + m.Version + ".zip"
 }
