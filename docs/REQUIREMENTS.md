@@ -650,3 +650,48 @@ progress UI and §19-20's doctor-mode UI both assumed reuse of "the WebView2-bas
 That shell no longer exists in that form. Either future effort should target `internal/tui`/
 `internal/wizard` instead, re-evaluating reuse feasibility at that time — this is noted here
 rather than by editing §12/§19-20's original text, consistent with how §22 superseded §13.
+
+## 24. Decisions (Round 13 — doctor mode implementation) — CONFIRMED, RESOLVES §20B
+
+§20b left four questions blocking implementation. Resolved directly with the operator:
+
+- **Invocation trigger**: `rigger.exe --doctor`, checked directly against `argv[1]` (not the
+  `flag` package, so it doesn't interfere with the existing raw-`argv[1]` protocol-handler URI
+  detection). No separate shortcut, no automatic-offer-after-N-failures tracking — simplest
+  option, no new state to maintain.
+- **UI technology**: §20's "reuse the WebView2-based UI shell" is moot (§23). Doctor mode reuses
+  **`internal/wizard`**, not `internal/tui` — `internal/wizard` is stdlib-only (`net/http` +
+  `html/template`), so it adds zero new dependencies to `rigger.exe`'s every-launch binary, unlike
+  `internal/tui` which would pull in `bubbletea`/`lipgloss`. A browser page also gives the
+  already-decided `mailto:` "Contact Support" link (§20) native support.
+- **Network test semantics**: a full HTTP GET against `ManifestServerUrl`, parsed as a manifest
+  (success = HTTP 200 + valid manifest JSON, not just "the port answered") — not a bare TCP
+  connect. Proxy status is the registry's already-resolved `ProxyHost`/`ProxyPort`, not a live
+  `internal/proxydetect` re-run — no exception to §18's "Rigger never re-detects" principle.
+- **Registry/JRE validation depth**: deep, not shallow. Beyond "does `Software\<AppId>` exist":
+  confirm `InstallDir`/`DataDir` still exist on disk, and that the JRE directory the manifest
+  names actually contains `javaw.exe` (not just that the directory exists). A failed registry
+  read is itself the worst case doctor mode exists to help with — it's caught and rendered as one
+  clear failed check (naming the fix: reinstall) rather than doctor mode itself crashing; no
+  further checks can run without `InstallDir`/`DataDir`, so the report is deliberately short in
+  that case, not broken.
+
+**Log collection** (§19 point 4, previously unresolved on scope/format): every `*.log` file found
+directly under `DataDir` — covers `rigger.log` plus whatever the launched app itself writes there
+(e.g. `abc-launch.log` in the fixture), without hardcoding any app-specific filename, since Stage
+supports arbitrary apps — zipped to `<DataDir>/diagnostics-<timestamp>.zip`. No "Save As" dialog;
+the path is simply shown on the page (and included in the `mailto:` body per §20's decision that
+the link carries a path reference, not an attachment).
+
+**New manifest field**: `supportEmail` (optional) — the `mailto:` recipient for "Contact Support"
+(§20 decided the mechanism; it didn't say where the address comes from). Lives in the manifest,
+not the registry, so it can change without a reinstall, consistent with everything else
+`ManifestServerUrl` polling already refreshes. Empty disables the button entirely.
+
+Implementation: `internal/doctor` (pure diagnostic logic — `Run`, `CollectLogs` — fully
+unit-tested except the registry read itself, which needs real Windows state like other
+Windows-native packages in this repo) + `internal/wizard`'s new `ShowDoctorReport` (a single
+static results page, no multi-screen flow — the checks are fast enough that no progress UI is
+needed, unlike §19's original "potentially slow" framing, which was written before knowing what
+the actual checks would be). Manually verified end-to-end on a real install, including the worst
+case (a corrupted registry key) rendering one clear, actionable failure rather than crashing.

@@ -53,6 +53,12 @@ type Manifest struct {
 	// in JVMOptions/Arguments. Any other query param is ignored.
 	ProtocolParams []string     `json:"protocolParams,omitempty"`
 	Shortcut       ShortcutSpec `json:"shortcut"`
+	// SupportEmail, if set, is the recipient for doctor mode's "Contact
+	// Support" mailto: link (docs/REQUIREMENTS.md §20/§24). Lives in the
+	// manifest rather than the registry so it can change without a
+	// reinstall, like everything else ManifestServerURL polling refreshes.
+	// Empty disables the button entirely — not a required field.
+	SupportEmail string `json:"supportEmail,omitempty"`
 }
 
 // RuntimeSpec identifies the JRE this manifest requires.

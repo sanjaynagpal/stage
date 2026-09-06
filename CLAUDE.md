@@ -167,11 +167,11 @@ binary with no console. All methods are nil-receiver-safe — `Info`/`Warn` stil
 when the `*Logger` is nil (e.g. `Open` failed because DataDir isn't writable), only the file
 write is skipped — so `cmd/rigger` never needs a nil-check at each call site. `LogFatal` is
 file-only (never console): `main()`'s `uierror.Fatalf` already reports a fatal error to the user,
-so reusing `Warn` there would double-print it. A full interactive **doctor/diagnostic mode**
-(network checks, registry/JRE validation, log collection, a UI for anything slow) is a
-documented-but-deferred requirement — see §19-20b of REQUIREMENTS.md — not yet built; it was
-planned to reuse an embedded WebView2 shell that was later abandoned (§23), so it would target
-`internal/tui`/`internal/wizard` instead if built.
+so reusing `Warn` there would double-print it. **Doctor mode** (`rigger.exe --doctor`,
+`internal/doctor` — network reachability, registry/JRE validation, log collection into a zip,
+a `mailto:` "Contact Support" link) is implemented — see §19-20b and §24 of REQUIREMENTS.md. It
+renders via `internal/wizard.ShowDoctorReport`, not `internal/tui`, specifically so this
+rarely-used mode doesn't pull `bubbletea`/`lipgloss` into `rigger.exe`'s every-launch binary.
 
 ### Network zones & proxy (§17-18)
 
