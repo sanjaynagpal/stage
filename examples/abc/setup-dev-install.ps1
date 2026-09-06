@@ -132,4 +132,4 @@ Write-Host "       & '$installRoot\rigger.exe' '${protocolScheme}://launch?token
 Write-Host "  5. Log written to: $dataDir\abc-launch.log"
 Write-Host "  6. Rigger's own log: $dataDir\rigger.log"
 Write-Host "  7. To test on-demand JRE provisioning (in-process, PackageMode=Dynamic here),"
-Write-Host "     delete $installRoot\jre\$javaVersion and relaunch — see docs/TESTING.md §2.6"
+Write-Host "     delete $installRoot\jre\$javaVersion and relaunch — see docs/TESTING.md §2.5"

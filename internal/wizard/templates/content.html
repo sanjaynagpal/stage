@@ -1,0 +1,29 @@
+{{define "content"}}
+{{if eq .Kind 1}}
+<form hx-post="/{{.Token}}/confirm" hx-target="#content" hx-swap="innerHTML">
+  <pre style="white-space:pre-wrap;font-family:inherit;max-height:320px;overflow-y:auto;">{{.Prompt}}</pre>
+  <button type="submit" name="value" value="yes">Yes</button>
+  <button type="submit" name="value" value="no">No</button>
+</form>
+{{else if eq .Kind 2}}
+<form hx-post="/{{.Token}}/readline" hx-target="#content" hx-swap="innerHTML">
+  <p>{{.Prompt}}</p>
+  <input type="text" name="value" autofocus>
+  <button type="submit">Continue</button>
+</form>
+{{else if eq .Kind 3}}
+<div class="error">{{.ErrText}}</div>
+<form hx-post="/{{.Token}}/retrycancel" hx-target="#content" hx-swap="innerHTML">
+  <p>{{.Prompt}}</p>
+  <button type="submit" name="choice" value="retry">Retry</button>
+  <button type="submit" name="choice" value="cancel">Cancel</button>
+</form>
+{{else if eq .Kind 4}}
+<div class="log">{{range .Log}}<div>{{.}}</div>{{end}}</div>
+<p>Setup has finished. You may close this window.</p>
+{{else}}
+<div hx-get="/{{.Token}}/screen" hx-trigger="every 1s" hx-target="#content" hx-swap="innerHTML" class="log">
+  {{range .Log}}<div>{{.}}</div>{{end}}
+</div>
+{{end}}
+{{end}}

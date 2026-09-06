@@ -151,8 +151,12 @@ the highest-risk new piece: no COM support exists in `golang.org/x/sys/windows` 
 `CoInitializeEx`/`GUID`, so this binds `CoCreateInstance` manually and drives the
 `IShellLinkW`/`IPersistFile` vtables directly; verified against an independent `WScript.Shell`
 COM readback in its own tests, not just "didn't panic"). `internal/console` provides the
-`Confirm`/`RetryCancel`/`ReadLine` prompts `cmd/installer`/`cmd/uninstaller` use as their UI
-until the WebView2 wizard exists — plain stdin/stdout, fully unit-testable with a fake stdin.
+`Confirm`/`RetryCancel`/`ReadLine` prompts `cmd/uninstaller` uses as its UI — plain stdin/stdout,
+fully unit-testable with a fake stdin. `cmd/installer` uses the same interface shape but two
+richer implementations instead: `internal/tui` (a Bubble Tea/Lipgloss terminal wizard, the
+default) and `internal/wizard` (a local-HTTP-server browser wizard, `-gui`) — see
+`docs/REQUIREMENTS.md` §23 for why the originally planned embedded-WebView2 control was
+abandoned in favor of these two.
 
 ### Tiered feedback logging (§19, `internal/applog`)
 
@@ -164,8 +168,10 @@ when the `*Logger` is nil (e.g. `Open` failed because DataDir isn't writable), o
 write is skipped — so `cmd/rigger` never needs a nil-check at each call site. `LogFatal` is
 file-only (never console): `main()`'s `uierror.Fatalf` already reports a fatal error to the user,
 so reusing `Warn` there would double-print it. A full interactive **doctor/diagnostic mode**
-(network checks, registry/JRE validation, log collection, a WebView2 UI) is a documented-but-
-deferred requirement — see §19-20b of REQUIREMENTS.md — not yet built.
+(network checks, registry/JRE validation, log collection, a UI for anything slow) is a
+documented-but-deferred requirement — see §19-20b of REQUIREMENTS.md — not yet built; it was
+planned to reuse an embedded WebView2 shell that was later abandoned (§23), so it would target
+`internal/tui`/`internal/wizard` instead if built.
 
 ### Network zones & proxy (§17-18)
 
@@ -191,12 +197,13 @@ lookup table; one install always has exactly one zone/proxy pair.
 
 ### Remaining empty placeholder packages
 
-Three directories are still empty, reserved for planned work per `docs/REQUIREMENTS.md` — not
-accidentally-empty or safe to repurpose without checking intent first: `internal/wizard` (the
-future WebView2 UI shell), `internal/signing` (Authenticode — `stagebuild` reads
-`AppConfig.Signing` but only warns that it's unimplemented rather than acting on it), and
-`internal/riggerupdate`. (`cmd/maintain` was tried and deliberately removed — see above — not
-left as a placeholder; that's a different situation from these three.) `internal/uninstallkey` is
+Two directories are still empty, reserved for planned work per `docs/REQUIREMENTS.md` — not
+accidentally-empty or safe to repurpose without checking intent first: `internal/signing`
+(Authenticode — `stagebuild` reads `AppConfig.Signing` but only warns that it's unimplemented
+rather than acting on it) and `internal/riggerupdate`. (`cmd/maintain` was tried and deliberately
+removed — see above — not left as a placeholder; `internal/wizard` was tried, abandoned, and its
+name reused for a different, implemented package — see §23 — neither is in the same situation as
+these two genuinely still-open placeholders.) `internal/uninstallkey` is
 also still empty and likely vestigial — its intended purpose (the standard Add/Remove Programs
 Uninstall key) turned
 out to already be fully covered by `internal/winreg.WriteUninstallValues`/`DeleteUninstallValues`,

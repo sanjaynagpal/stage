@@ -147,7 +147,7 @@ and confirm the line count grows):
 - `%AppData%\ABC\abc-launch.log` — the fixture Java app's own report of what it received
   (arguments and the `abc.*` system properties Rigger injected).
 
-### 2.6 Testing on-demand JRE provisioning (Dynamic package mode)
+### 2.5 Testing on-demand JRE provisioning (Dynamic package mode)
 
 `setup-dev-install.ps1` (§2.1) already sets `PackageMode=Dynamic` in the registry and, alongside
 the local `jre/<version>` copy, zips the same JDK into a servable archive at
@@ -186,7 +186,7 @@ value, then launch. Expect a fatal error naming the checksum mismatch, and confi
 directory was not created. Restore the correct checksum afterward (rerun
 `setup-dev-install.ps1`, which recomputes and rewrites it).
 
-### 2.7 Clean up
+### 2.6 Clean up
 
 Kill any leftover processes after testing:
 ```powershell
@@ -194,3 +194,52 @@ Get-Process javaw, fakeserver, rigger -ErrorAction SilentlyContinue | Stop-Proce
 ```
 (`go run` also leaves a `go.exe` parent process behind if you started `fakeserver` that way —
 `Ctrl+C` in its shell is cleaner than killing it externally.)
+
+## 3. Manual end-to-end test: `cmd/installer`'s two UIs
+
+`internal/tui` (default) and `internal/wizard` (`-gui`) drive the same install logic
+(docs/DESIGN.md §2.9d) — neither is meaningfully testable without a real Windows machine (a real
+terminal for `tui`, a real browser for `wizard`), so this is manual-only, same as `internal/wizard`'s
+own `httptest` coverage only reaching the HTTP layer, not the actual rendered UX.
+
+### 3.1 Build a real installer
+
+```powershell
+.\examples\abc\prepare-stagebuild-fixtures.ps1
+go run .\cmd\stagebuild -config examples\abc\appconfig.generated.json -env PROD -zone Internet
+```
+Produces `dist\ABCSetup.exe`.
+
+### 3.2 Terminal UI (default)
+
+```powershell
+.\dist\ABCSetup.exe
+```
+Expect a styled, bordered box (title in color, rounded border) showing the fixture license text
+and a `[y/N]` prompt. Walk through: license → package-mode confirm → proxy override (press Enter
+to accept the detected value) → extraction (status lines accumulate below the box) → "Launch ABC
+now?". Confirm the install completes (`HKCU:\Software\ABC` populated, `%LocalAppData%\ABC`
+extracted, Start Menu/Desktop shortcuts created) and that Ctrl+C at any prompt exits the process
+immediately rather than hanging.
+
+### 3.3 Browser wizard (`-gui`)
+
+```powershell
+.\dist\ABCSetup.exe -gui
+```
+Expect a line printed to the console (`Opening setup in your browser: http://127.0.0.1:<port>/<token>/`)
+and an Edge "app window" (no address bar/tabs) opening to the same license screen. Click through
+each screen; confirm the install reaches the same end state as §3.2. To verify the heartbeat/
+cancel path, close the browser window mid-flow (e.g. at the proxy prompt) instead of answering —
+expect the process to print a warning and exit within ~20 seconds rather than hang indefinitely.
+
+### 3.4 Clean up
+
+```powershell
+Get-Process ABCSetup -ErrorAction SilentlyContinue | Stop-Process -Force
+Remove-Item -Recurse -Force "$env:LocalAppData\ABC" -ErrorAction SilentlyContinue
+Remove-Item -Path HKCU:\Software\ABC -Recurse -Force -ErrorAction SilentlyContinue
+```
+Leave any Edge windows open unless you're certain they were opened by this test — `-gui` opens a
+normal `msedge.exe` process, indistinguishable from the operator's own browsing session by image
+name alone.

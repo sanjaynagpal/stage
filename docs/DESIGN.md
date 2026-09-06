@@ -27,7 +27,7 @@ config and manifest.
 |---|---|---|
 | `rigger.exe` (`cmd/rigger`) | **Implemented** | Generic, prebuilt-once launcher. Zero per-app compiled state — derives its app identity from its own install folder name. |
 | `stagebuild` (`cmd/stagebuild`) | **Implemented** | Per-app build tool; consumes an `appconfig.AppConfig` and really compiles `cmd/installer` fresh per (Environment, NetworkZone) pair, with that build's payload embedded via `go:embed`. |
-| the generated installer (`cmd/installer`) | **Implemented** (minimal console UI, no WebView2 yet) | Runs the full §16 flow — prerequisite checks, extraction, registry writes, protocol-handler/file-association/shortcut registration. |
+| the generated installer (`cmd/installer`) | **Implemented** (polished terminal UI by default, `-gui` for a browser wizard — §23) | Runs the full §16 flow — prerequisite checks, extraction, registry writes, protocol-handler/file-association/shortcut registration. |
 | the uninstaller (`cmd/uninstaller`, `unins.exe`) | **Implemented** (minimal console UI) | Self-copy-and-relaunch teardown: removes files, registry keys, protocol handler, file associations, shortcuts. |
 
 Stage ships exactly two binaries per install: `rigger.exe` and `unins.exe`. There is no
@@ -173,10 +173,11 @@ skipped — so `cmd/rigger` never needs a nil-check at each call site. `LogFatal
 user, so reusing `Warn` there would double-print it.
 
 A much larger interactive **doctor/diagnostic mode** (network reachability checks, registry/JRE
-integrity validation, log collection, a `mailto:`-based "contact support" action, a WebView2 UI
-for anything slow) is a documented-but-deferred requirement — see `REQUIREMENTS.md` §19-20b —
-not built yet, since it needs UI infrastructure (§11b's planned WebView2 embed) that doesn't
-exist anywhere in this repo.
+integrity validation, log collection, a `mailto:`-based "contact support" action, a UI for
+anything slow) is a documented-but-deferred requirement — see `REQUIREMENTS.md` §19-20b — not
+built yet. It was originally planned to reuse an embedded WebView2 shell (§11b); that approach
+was abandoned (§23, superseding §11b) in favor of `internal/tui`/`internal/wizard`, so any future
+doctor-mode work should target those instead, re-evaluating reuse feasibility at that time.
 
 ### 2.9 stagebuild → installer → uninstaller pipeline
 
@@ -294,6 +295,44 @@ signing surface. It's still unimplemented today for an unrelated reason: there's
 manifest/appconfig field yet to declare a rigger.exe version + download URL + checksum (analogous
 to `RuntimeSpec`), which is a real schema decision, not something "depends on nothing new."
 
+### 2.9d `cmd/installer`'s two UIs (`internal/tui`, `internal/wizard`)
+
+§11b originally called for an embedded WebView2 control; that was implemented far enough to hit
+real problems (Go-implemented COM callbacks, a hand-rolled Win32 message loop, an unsourceable
+`WebView2Loader.dll`) and abandoned. §23 records the full reasoning; this section covers the
+resulting architecture. `cmd/installer` now has an `installerUI` interface
+(`Confirm`/`RetryCancel`/`ReadLine`/`Notify`) that `run()`'s install logic is written against,
+with two implementations selected by a `-gui` flag (default: terminal):
+
+- **`internal/tui`** — an Elm-architecture Bubble Tea program (`github.com/charmbracelet/
+  bubbletea` + `lipgloss` — this repo's first third-party dependency beyond `golang.org/x/sys`).
+  A `model` holds which screen is active; `Update` handles both `installerUI` request messages
+  (sent via `program.Send`, e.g. a `confirmRequest`) and `tea.KeyMsg` key presses, delivering the
+  operator's answer on a per-call response channel; `View` renders it styled via `lipgloss`
+  (a rounded-border box, colored title, a log of `Notify` lines). Since `tea.Program.Run()` blocks
+  until quit, it runs on its own goroutine; `installerUI` methods block the calling (installer)
+  goroutine on the response channel. Ctrl+C exits the whole process — the same effective behavior
+  a plain console prompt already had, not a regression.
+- **`internal/wizard`** — a `net/http.Server` on an ephemeral loopback port, opened via
+  `msedge.exe --app=...` for a chrome-less window (falling back to the OS default browser).
+  Every route requires a random per-session token embedded in the URL. Screens are Go
+  `html/template` fragments; HTMX (`go:embed`ded JS, plain source — no binary/supply-chain
+  concern) drives partial-page swaps on form submission, an every-2s heartbeat POST (missing
+  heartbeats abort the process, the browser-UI analogue of `internal/tui`'s Ctrl+C-quits
+  behavior), and an every-1s poll of the current screen. `installerUI` methods block on a shared
+  `state` struct's `sync.Cond`: after delivering an answer, the UI transitions to an idle/log
+  screen immediately (`setIdle`) rather than waiting for the *next* interactive prompt, which
+  might be seconds away (e.g. across the extraction phase) — the idle screen's own polling is
+  what then surfaces progress and, eventually, the next prompt. (`Notify` deliberately does
+  *not* wake a waiter for this reason — an earlier version did, and a `Notify` call landing
+  between two prompts caused the already-answered prompt to be redisplayed; caught by manual
+  end-to-end testing and covered by a regression test,
+  `TestNotifyBetweenPromptsDoesNotStallOrCorruptNextScreen`.)
+
+Both are genuinely unit-testable — `internal/tui` by feeding messages into `Update` and asserting
+on the resulting model, `internal/wizard` by driving its handlers with `httptest` — unlike the
+abandoned WebView2 approach, which had no path to automated testing at all.
+
 ### 2.10 Update model
 
 Two independent channels, regardless of package mode:
@@ -338,11 +377,13 @@ Two independent channels, regardless of package mode:
 | `protocolhandler` | Registers/unregisters the custom URI scheme (§11). | Writes the conventional `"URL Protocol"` marker too, not just `shell\open\command`. Leaf-first delete on unregister (`registry.DeleteKey` requires an empty key). |
 | `fileassoc` | Registers/unregisters optional file-type associations (§16 step 3). | Documents inline that double-clicking an associated file is currently inert — Rigger has no `${openedFile}`-style handling yet, a known, separate gap. |
 | `shortcut` | Creates/removes `.lnk` files via raw COM (`IShellLinkW`/`IPersistFile`). | `golang.org/x/sys/windows` has no COM bindings beyond `CoInitializeEx`/`GUID` — binds `CoCreateInstance` manually and drives vtables directly. Verified against an independent `WScript.Shell` readback, not just "didn't crash." |
-| `console` | Minimal `Confirm`/`RetryCancel`/`ReadLine` prompts — the installer/uninstaller's UI until the WebView2 wizard exists. | Fully unit-testable by feeding a fake stdin; no real console needed. |
+| `console` | Minimal `Confirm`/`RetryCancel`/`ReadLine` prompts — `cmd/uninstaller`'s UI (§2.9d: `cmd/installer` now uses `internal/tui`/`internal/wizard` instead). | Fully unit-testable by feeding a fake stdin; no real console needed. |
+| `tui` | `cmd/installer`'s default UI: a Bubble Tea/Lipgloss terminal wizard implementing `installerUI` (§2.9d, §23). | This repo's first third-party Go dependency beyond `golang.org/x/sys`, deliberately accepted since the terminal path is now permanent, not a stand-in. Tested by feeding messages into `Update`. |
+| `wizard` | `cmd/installer`'s `-gui` UI: a local `net/http` server + HTMX opened as a browser "app window," implementing `installerUI` (§2.9d, §23). | No COM, no message loop, no native binary dependency — HTMX is checked-in JS source. Tested with `httptest`. |
 
-`internal/riggerupdate`, `internal/signing`, and `internal/wizard` remain empty placeholder
-packages (reserved for planned work per `REQUIREMENTS.md`) — not accidentally empty, not safe to
-repurpose without checking intent first. `internal/uninstallkey` is also still empty and likely
+`internal/riggerupdate` and `internal/signing` remain empty placeholder packages (reserved for
+planned work per `REQUIREMENTS.md`) — not accidentally empty, not safe to repurpose without
+checking intent first. `internal/uninstallkey` is also still empty and likely
 vestigial: its intended purpose (the standard Uninstall registry key) turned out to already be
 fully covered by `internal/winreg.WriteUninstallValues`/`DeleteUninstallValues`, predating this
 package, which `cmd/installer`/`cmd/uninstaller` actually use.
@@ -385,12 +426,12 @@ also recorded via `logger.LogFatal` before `main()` reports it through `uierror.
 |---|---|
 | `cmd/rigger` — full launch flow, protocol-handler path, zone/proxy resolution, tiered logging | **Implemented, unit-tested, manually verified end-to-end** |
 | `cmd/stagebuild` — payload population, real `go build` invocation, output to `dist/` | **Implemented, manually verified end-to-end** |
-| `cmd/installer` — full §16 flow, console UI | **Implemented, manually verified end-to-end** (real install, real registry/shortcuts/protocol handler) |
+| `cmd/installer` — full §16 flow, terminal UI by default, `-gui` for a browser wizard (§2.9d, §23) | **Implemented, manually verified end-to-end** (real install, real registry/shortcuts/protocol handler, both UIs) |
 | `cmd/uninstaller` — self-copy-and-relaunch teardown | **Implemented, manually verified end-to-end** (confirmed complete removal) |
-| `internal/*` packages listed in §3 (all but the three remaining placeholders) | **Implemented, unit-tested** |
+| `internal/*` packages listed in §3 (all but the two remaining placeholders) | **Implemented, unit-tested** |
 | `internal/jreprovision`'s on-demand invocation from a *running* Rigger (Dynamic mode), in-process (§2.9c) | **Implemented, manually verified end-to-end** — `cmd/rigger` calls `jreprovision.Provision` directly when the required JRE is missing and `PackageMode` is `Dynamic`. |
 | `rigger.exe` binary self-update | Not implemented — no manifest/appconfig field exists yet to declare a rigger.exe version/download location (§2.9c) |
-| `internal/wizard` (WebView2 UI shell) | Not implemented — nothing in this repo uses a UI toolkit yet; `cmd/installer`/`cmd/uninstaller` use plain console I/O instead |
+| `internal/tui` / `internal/wizard` (`cmd/installer`'s two UIs, §2.9d) | **Implemented, unit-tested, manually verified end-to-end** — supersedes the originally planned embedded-WebView2 shell (§23) |
 | Doctor / diagnostic mode | Requirement documented (`REQUIREMENTS.md` §19-20b); not implemented |
 | Jar delivery via Rigger fetching from `ManifestServerUrl` (§9, `internal/jarprovision`) | **Implemented, unit-tested** — `cmd/rigger` fetches/unpacks a missing version directory before launch, verified by checksum, evicting old versions past `MaxRetainedVersions=2`. |
 
@@ -422,13 +463,12 @@ also recorded via `logger.LogFatal` before `main()` reports it through `uierror.
 
 Roughly in dependency order:
 
-1. **`internal/wizard`** (WebView2 embed, §11b) — first real UI in the codebase; a prerequisite
-   for both slow-operation progress feedback and doctor mode. `cmd/installer`/`cmd/uninstaller`
-   work today with plain console I/O, so this is a visual-polish upgrade, not a functional gap.
-2. **Doctor/diagnostic mode** (§19-20b) — has several genuinely open questions (invocation
+1. **Doctor/diagnostic mode** (§19-20b) — has several genuinely open questions (invocation
    trigger, exact network-test semantics, log-collection format) that need resolving before
-   implementation.
-3. **`rigger.exe` binary self-update** (§13) — needs a new manifest/appconfig field to declare a
+   implementation; also needs to pick a UI approach now that the originally planned WebView2
+   shell it was going to reuse doesn't exist (§23) — `internal/tui`/`internal/wizard` are the
+   candidates to re-evaluate.
+2. **`rigger.exe` binary self-update** (§13) — needs a new manifest/appconfig field to declare a
    rigger.exe version + download location + checksum (analogous to `RuntimeSpec`), which is a real
    schema decision, not implemented speculatively alongside the JRE-provisioning work (§2.9c).
    When it is built, it won't need a companion exe either — see §2.9c's self-copy-relaunch note.
@@ -436,5 +476,7 @@ Roughly in dependency order:
 Jar delivery via Rigger (§9) — previously the top item here — is now implemented
 (`internal/jarprovision`, §2.9b); the full `stagebuild` → install → launch pipeline works end to
 end with real application code, not just the launcher/runtime/registration plumbing. On-demand JRE
-provisioning (§12-14) — the item after that — is also now implemented, in-process inside
-`cmd/rigger` rather than via a separate `cmd/maintain` binary (§2.9c, §22).
+provisioning (§12-14) — implemented in-process inside `cmd/rigger` rather than via a separate
+`cmd/maintain` binary (§2.9c, §22). `cmd/installer`'s UI (§11b) — the item before that — is also
+now implemented, as a polished terminal wizard by default plus a `-gui` browser wizard, replacing
+the originally planned embedded WebView2 control (§2.9d, §23).

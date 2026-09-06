@@ -599,6 +599,54 @@ its own running exe), but a *second* generic companion binary is not.
   `rigger.exe` copies itself to `%TEMP%`, runs that copy with a flag, the copy overwrites the real
   `rigger.exe` in the install root, then relaunches it. No new binary is shipped or signed; the
   `%TEMP%` copy is transient, not an installed artifact.
-- **`cmd/maintain` is deleted**, not left as an empty placeholder — unlike `internal/wizard`/
-  `internal/signing`/`internal/riggerupdate`, which remain reserved for genuinely unresolved future
-  work, this direction was tried, reconsidered, and is not the intended design going forward.
+- **`cmd/maintain` is deleted**, not left as an empty placeholder — unlike `internal/signing`/
+  `internal/riggerupdate`, which remain reserved for genuinely unresolved future work, this
+  direction was tried, reconsidered, and is not the intended design going forward.
+
+## 23. Decisions (Round 12 — `cmd/installer` UI: terminal default + browser wizard) — CONFIRMED, SUPERSEDES §11B
+
+§11b's "embedded Microsoft Edge WebView2 control" decision was implemented far enough to
+discover its real costs, then abandoned in favor of a different design. Both are recorded here
+because the reasoning — not just the outcome — is what future changes need to respect.
+
+**Why WebView2 was abandoned:**
+- It requires Go to *implement* COM callback interfaces (WebView2's environment/controller
+  creation is asynchronous, calling back into completion handlers the caller must supply) — a
+  new kind of Windows interop this codebase had never needed; every existing package
+  (`internal/shortcut` included) only ever calls *into* COM, never implements it.
+- It requires a hand-rolled Win32 window and message loop — also new territory, and
+  `golang.org/x/sys/windows` provides neither (confirmed by inspection: no `RegisterClassEx`,
+  `CreateWindowEx`, `GetMessage`, or `DispatchMessage`, only window-query functions).
+- It depends on `WebView2Loader.dll`, a native binary distinct from the WebView2 *Runtime*
+  (which genuinely is preinstalled on the Windows 10 1803+/11 target) — the Loader is not, per
+  Microsoft's own distribution guidance, and three separate constraints blocked sourcing it
+  cleanly: org policy disallows committing binaries to source control, the GitLab CI build image
+  is Linux (not a problem for this pure-Go repo generally, but ruling out any approach requiring
+  a Windows-side fetch/link step), and the pipeline's only network egress is through a local
+  Nexus repository whose ability to proxy the relevant feed was unconfirmed.
+- It would have been effectively untestable — no unit tests possible, only real-Windows manual
+  verification, unlike every other package in this repo.
+
+**Final design — `cmd/installer` has two real UIs, chosen by a `-gui` flag:**
+- **Default: `internal/tui`**, a polished terminal wizard built on
+  `github.com/charmbracelet/bubbletea` + `lipgloss`. This is **the first third-party Go
+  dependency this repo has added beyond `golang.org/x/sys`** — a deliberate exception, made
+  because the terminal path is no longer a temporary stand-in the way `internal/console`
+  originally was; it's the permanent default, so it needs to look genuinely good. Both libraries
+  are pure Go (no CGO), preserving Linux-runner cross-compilation.
+- **`-gui`: `internal/wizard`**, a local `net/http` server (Go `html/template` + HTMX for
+  interactivity) opened as a chrome-less Edge "app window" (`msedge.exe --app=...`, falling back
+  to the OS default browser if Edge isn't found at its known path). HTMX is plain JS **source**
+  checked into the repo like any other file — none of `WebView2Loader.dll`'s binary/supply-chain
+  concerns apply to it.
+- `internal/console` is untouched and keeps serving `cmd/uninstaller`, whose simple confirm/retry
+  flow doesn't need this treatment.
+- Neither UI conflicts with §9's "Silent install: v1 targets the GUI wizard only... CLI flags
+  deferred" — `-gui` is a presentation switch, not a silent/unattended mode; both paths require
+  the same interactive confirmations.
+
+**Effect on other sections referencing the WebView2 shell**: §12's on-demand-JRE-provisioning
+progress UI and §19-20's doctor-mode UI both assumed reuse of "the WebView2-based UI shell."
+That shell no longer exists in that form. Either future effort should target `internal/tui`/
+`internal/wizard` instead, re-evaluating reuse feasibility at that time — this is noted here
+rather than by editing §12/§19-20's original text, consistent with how §22 superseded §13.

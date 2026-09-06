@@ -1,14 +1,18 @@
 // Command installer is Stage's generated, per-app installer
 // (docs/REQUIREMENTS.md §16). stagebuild compiles it fresh for each app
 // build with that app's payload embedded via go:embed (see internal/payload
-// for the embedded file schema). Its UI is plain console I/O for now — the
-// polished WebView2 wizard (§11b) is a separate, later effort.
+// for the embedded file schema). Its UI defaults to a polished terminal
+// wizard (internal/tui); -gui switches to a browser-based wizard
+// (internal/wizard) instead — see docs/REQUIREMENTS.md §23 for why an
+// embedded WebView2 control (the originally planned §11b approach) was
+// abandoned in favor of these two.
 package main
 
 import (
 	"archive/zip"
 	"bytes"
 	"embed"
+	"flag"
 	"fmt"
 	"io/fs"
 	"net"
@@ -18,7 +22,6 @@ import (
 	"strings"
 
 	"github.com/sanjaynagpal/stage/internal/appconfig"
-	"github.com/sanjaynagpal/stage/internal/console"
 	"github.com/sanjaynagpal/stage/internal/diskspace"
 	"github.com/sanjaynagpal/stage/internal/elevate"
 	"github.com/sanjaynagpal/stage/internal/fileassoc"
@@ -30,24 +33,60 @@ import (
 	"github.com/sanjaynagpal/stage/internal/protocolhandler"
 	"github.com/sanjaynagpal/stage/internal/proxydetect"
 	"github.com/sanjaynagpal/stage/internal/shortcut"
+	"github.com/sanjaynagpal/stage/internal/tui"
 	"github.com/sanjaynagpal/stage/internal/winreg"
+	"github.com/sanjaynagpal/stage/internal/wizard"
 )
 
 //go:embed all:payload
 var payloadFS embed.FS
 
+// installerUI is the presentation layer run() drives — internal/tui (the
+// default) and internal/wizard (-gui) each implement it, and run()'s
+// install logic doesn't care which one it's given.
+type installerUI interface {
+	Confirm(prompt string, defaultYes bool) bool
+	RetryCancel(prompt string, check func() error) error
+	ReadLine(prompt string) string
+	Notify(msg string)
+}
+
 func main() {
-	if err := run(); err != nil {
+	gui := flag.Bool("gui", false, "use the browser-based wizard instead of the terminal UI")
+	flag.Parse()
+
+	cfg, err := loadEmbeddedAppConfig()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "installer: error:", err)
+		os.Exit(1)
+	}
+
+	var ui installerUI
+	var closeUI func()
+	if *gui {
+		w, err := wizard.New(cfg.AppName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "installer: error:", err)
+			os.Exit(1)
+		}
+		ui, closeUI = w, w.Close
+	} else {
+		t := tui.New(cfg.AppName)
+		ui, closeUI = t, t.Close
+	}
+
+	runErr := run(ui, cfg)
+	if runErr != nil {
+		ui.Notify(fmt.Sprintf("Error: %v", runErr))
+	}
+	closeUI()
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, "installer: error:", runErr)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	cfg, err := loadEmbeddedAppConfig()
-	if err != nil {
-		return err
-	}
+func run(ui installerUI, cfg *appconfig.AppConfig) error {
 	m, err := loadEmbeddedManifest()
 	if err != nil {
 		return err
@@ -57,16 +96,14 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("%s Setup (version %s)\n", cfg.AppName, m.Version)
-	fmt.Printf("Publisher: %s\n\n", cfg.Publisher)
+	ui.Notify(fmt.Sprintf("%s Setup (version %s) — Publisher: %s", cfg.AppName, m.Version, cfg.Publisher))
 
 	licenseText, err := payloadFS.ReadFile("payload/" + payload.LicenseName)
 	if err != nil {
 		return fmt.Errorf("installer: read embedded license: %w", err)
 	}
-	fmt.Println(string(licenseText))
-	if !console.Confirm("Do you accept the license agreement?", false) {
-		fmt.Println("Installation cancelled.")
+	if !ui.Confirm(string(licenseText)+"\n\nDo you accept the license agreement?", false) {
+		ui.Notify("Installation cancelled.")
 		return nil
 	}
 
@@ -81,18 +118,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := checkPrerequisites(root, cfg.AppName, requiredBytes); err != nil {
+	if err := checkPrerequisites(ui, root, cfg.AppName, requiredBytes); err != nil {
 		return err
 	}
 
 	packageMode := winreg.ModeStatic
 	if scope == layout.ScopePerUser {
-		if console.Confirm("Allow "+cfg.AppName+" to update its runtime/launcher automatically in the background?", true) {
+		if ui.Confirm("Allow "+cfg.AppName+" to update its runtime/launcher automatically in the background?", true) {
 			packageMode = winreg.ModeDynamic
 		}
 	}
 
-	proxyHost, proxyPort := resolveProxy(m.ManifestServerURL)
+	proxyHost, proxyPort := resolveProxy(ui, m.ManifestServerURL)
 
 	// §9b: Stage creates the data directory, not left for Rigger to lazily
 	// create on first run.
@@ -100,7 +137,7 @@ func run() error {
 		return fmt.Errorf("installer: create %s: %w", dataDir, err)
 	}
 
-	fmt.Println("\nInstalling...")
+	ui.Notify("Installing...")
 	if err := extractPayload(root, cfg); err != nil {
 		return err
 	}
@@ -155,8 +192,8 @@ func run() error {
 		return fmt.Errorf("installer: write install record: %w", err)
 	}
 
-	fmt.Println("\nInstallation complete.")
-	if console.Confirm("Launch "+cfg.AppName+" now?", true) {
+	ui.Notify("Installation complete.")
+	if ui.Confirm("Launch "+cfg.AppName+" now?", true) {
 		cmd := exec.Command(riggerPath)
 		if err := cmd.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "installer: warning: failed to launch %s: %v\n", riggerPath, err)
@@ -219,12 +256,12 @@ func estimateRequiredBytes() (uint64, error) {
 	return total + total/5, nil
 }
 
-func checkPrerequisites(root, appName string, requiredBytes uint64) error {
+func checkPrerequisites(ui installerUI, root, appName string, requiredBytes uint64) error {
 	if _, err := os.Stat(root); err == nil {
 		// An existing install root: this is an upgrade-in-place, so make
 		// sure nothing is still running under it before touching anything
 		// (docs/REQUIREMENTS.md §16 step 1).
-		err := console.RetryCancel(appName+" appears to be running — please close it", func() error {
+		err := ui.RetryCancel(appName+" appears to be running — please close it", func() error {
 			running, err := procscan.RunningUnder(root)
 			if err != nil {
 				return err
@@ -249,19 +286,19 @@ func checkPrerequisites(root, appName string, requiredBytes uint64) error {
 	return nil
 }
 
-func resolveProxy(targetURL string) (host, port string) {
+func resolveProxy(ui installerUI, targetURL string) (host, port string) {
 	result, err := proxydetect.DetectForURL(targetURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "installer: warning: proxy detection failed (%v); assuming a direct connection\n", err)
 		result = proxydetect.Result{}
 	}
 	if result.Empty() {
-		fmt.Println("Detected proxy: none (direct connection)")
+		ui.Notify("Detected proxy: none (direct connection)")
 	} else {
-		fmt.Printf("Detected proxy: %s:%s\n", result.Host, result.Port)
+		ui.Notify(fmt.Sprintf("Detected proxy: %s:%s", result.Host, result.Port))
 	}
 
-	override := console.ReadLine("Press Enter to accept, enter a host:port to override, or type 'none' for a direct connection: ")
+	override := ui.ReadLine("Press Enter to accept, enter a host:port to override, or type 'none' for a direct connection: ")
 	switch {
 	case override == "":
 		return result.Host, result.Port
