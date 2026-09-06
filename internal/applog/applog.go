@@ -1,8 +1,8 @@
-// Package applog is Rigger's (and later maintain.exe's) tiered feedback
-// logger: every message is written to the console immediately, and
-// durably appended to a per-install log file, so a launch's history
-// survives past the point rigger.exe stops having a console at all (see
-// internal/uierror's documented windowsgui-subsystem end state).
+// Package applog is Rigger's tiered feedback logger: every message is
+// written to the console immediately, and durably appended to a per-install
+// log file, so a launch's history survives past the point rigger.exe stops
+// having a console at all (see internal/uierror's documented
+// windowsgui-subsystem end state).
 package applog
 
 import (

@@ -71,7 +71,7 @@ func TestProvisionDownloadsVerifiesAndUnpacks(t *testing.T) {
 	root := t.TempDir()
 	jreDir := filepath.Join(root, "jre", "21.0.2+13")
 
-	if err := Provision(root, url, sha, jreDir); err != nil {
+	if err := Provision(http.DefaultClient, root, url, sha, jreDir); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestProvisionRejectsChecksumMismatch(t *testing.T) {
 	root := t.TempDir()
 	jreDir := filepath.Join(root, "jre", "21.0.2+13")
 
-	err := Provision(root, url, "0000000000000000000000000000000000000000000000000000000000000000", jreDir)
+	err := Provision(http.DefaultClient, root, url, "0000000000000000000000000000000000000000000000000000000000000000", jreDir)
 	if err == nil {
 		t.Fatal("expected checksum mismatch error")
 	}
@@ -123,7 +123,7 @@ func TestProvisionEvictsOldestVersionBeyondMax(t *testing.T) {
 	mkOldVersion("20.0.1+9", 1*time.Hour)
 
 	newDir := filepath.Join(jreRoot, "21.0.2+13")
-	if err := Provision(root, url, sha, newDir); err != nil {
+	if err := Provision(http.DefaultClient, root, url, sha, newDir); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 

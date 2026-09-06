@@ -29,10 +29,11 @@ config and manifest.
 | `stagebuild` (`cmd/stagebuild`) | **Implemented** | Per-app build tool; consumes an `appconfig.AppConfig` and really compiles `cmd/installer` fresh per (Environment, NetworkZone) pair, with that build's payload embedded via `go:embed`. |
 | the generated installer (`cmd/installer`) | **Implemented** (minimal console UI, no WebView2 yet) | Runs the full §16 flow — prerequisite checks, extraction, registry writes, protocol-handler/file-association/shortcut registration. |
 | the uninstaller (`cmd/uninstaller`, `unins.exe`) | **Implemented** (minimal console UI) | Self-copy-and-relaunch teardown: removes files, registry keys, protocol handler, file associations, shortcuts. |
-| `maintain.exe` (`cmd/maintain`) | Placeholder | Companion exe for on-demand JRE/rigger self-update (Dynamic package mode, §13-14). |
 
-Only `cmd/maintain` remains an empty directory reserved for planned work — not accidentally
-empty, not safe to repurpose without checking `REQUIREMENTS.md` first.
+Stage ships exactly two binaries per install: `rigger.exe` and `unins.exe`. There is no
+`cmd/maintain` — on-demand JRE provisioning (Dynamic package mode, §13-14) runs in-process inside
+`rigger.exe` itself; see §2.9c for why, and for the (unimplemented) `rigger.exe` self-update
+question.
 
 ### 2.2 Why Rigger has zero per-app compiled state
 
@@ -257,6 +258,42 @@ generalized to take an `include(name string) bool` filter for this reason —
 filter for `jarprovision`, while `jreprovision`'s own JRE-side eviction passes an
 always-true filter.
 
+### 2.9c On-demand JRE provisioning (in-process, no companion exe)
+
+§13 originally called for a separate "companion maintenance executable" (`maintain.exe`) for this.
+That's been superseded — see `docs/REQUIREMENTS.md` §22 (Round 11) — because every additional
+shipped binary is an additional thing that needs its own Authenticode signature and its own
+AV/SmartScreen reputation, and the constraint that motivated a *separate process* (a running
+program generally can't overwrite its own executable file) doesn't actually apply to JRE
+provisioning: fetching a JRE into `jre/<version>` never touches `rigger.exe`'s own file, so there's
+nothing stopping `rigger.exe` from doing it in-process, in the same run.
+
+In `cmd/rigger`'s `run()`, the former `TODO(Phase 8)` stub at the JRE-directory check now reads:
+
+1. If `appValues.PackageMode != winreg.ModeDynamic`, fail immediately with a clear error, exactly
+   as before — Static installs never self-update the runtime.
+2. Otherwise, build a second, longer-timeout proxy-aware client (`fetchClient`, 5 minutes, vs. the
+   10-second `manifestClient` used for the per-launch manifest poll — a JRE archive can
+   legitimately take a while) and call `internal/jreprovision.Provision(fetchClient, root,
+   m.DownloadURL(), m.Runtime.SHA256, jreDir)` directly — the exact routine the installer's
+   `ProvisionLocal` shares the download-verify-extract-evict core with (§12), just reached via a
+   network fetch instead of a local temp file. The same `fetchClient` is also now used for
+   `jarprovision.Provision`'s jar fetch (§2.9b), which had been reusing the short manifest-poll
+   client — a latent timeout risk for a real jar archive on a slow link, fixed here in passing.
+3. On success, log and continue with the now-present `jreDir`; on failure (checksum mismatch,
+   download error), `run()` returns an error that surfaces as a single clear fatal report via
+   `main()`'s `uierror.Fatalf`, never launching against a mismatched/missing runtime (§12-14's
+   confirmed failure behavior).
+
+**`rigger.exe` binary self-update** (the other half of §13's original "JRE/rigger self-update"
+companion-exe framing) is still not implemented, and — per §22 — won't need a companion exe either
+when it is: it would reuse the exact self-copy-to-`%TEMP%`-and-relaunch pattern `unins.exe`
+already uses on itself (copy `rigger.exe` to `%TEMP%`, run that copy with a flag, have it
+overwrite the real `rigger.exe` in the install root, then relaunch) — no new binary, no new
+signing surface. It's still unimplemented today for an unrelated reason: there's no
+manifest/appconfig field yet to declare a rigger.exe version + download URL + checksum (analogous
+to `RuntimeSpec`), which is a real schema decision, not something "depends on nothing new."
+
 ### 2.10 Update model
 
 Two independent channels, regardless of package mode:
@@ -273,10 +310,10 @@ Two independent channels, regardless of package mode:
   — this is the same always-on channel, not a separate one.
 - **`rigger.exe`/JRE binaries**: governed by `PackageMode`. `AllUsers` installs are always
   forced `Static` (Program Files isn't reliably writable by an ordinary later launch);
-  `PerUser` installs default to `Dynamic` and can self-update via `maintain.exe` (not yet built).
-  On-demand JRE provisioning when a manifest requests a version not on disk is a `TODO(Phase 8)`
-  stub today — `cmd/rigger` just fails with a clear error rather than launching a mismatched
-  runtime.
+  `PerUser` installs default to `Dynamic` and can self-update the JRE on demand, in-process, when
+  a manifest requests a version not on disk (§2.9c) — failing clearly if provisioning doesn't
+  succeed, rather than launching a mismatched runtime. `rigger.exe` binary self-update itself is
+  not yet implemented (§2.9c).
 
 ## 3. Package Reference (`internal/*`)
 
@@ -288,7 +325,7 @@ Two independent channels, regardless of package mode:
 | `winreg` | Reads/writes `Software\<AppId>` and the standard Uninstall key. | Tries `HKCU` then `HKLM` on read, but trusts the key's own `InstallScope` value rather than inferring scope from which hive answered. |
 | `applog` | Tiered console+log-file feedback (§2.8). | Nil-receiver-safe; `LogFatal` is file-only to avoid double-printing with `uierror`. |
 | `proxydetect` | WinHTTP-based, PAC-aware proxy auto-detection + a proxy-routed `http.Client`. | `golang.org/x/sys/windows` has no WinHTTP bindings — binds `winhttp.dll` directly via `LazyDLL`/`LazyProc`. Never consults `HTTP_PROXY` env vars — the registry's resolved value is the only source of truth. |
-| `jreprovision` | Downloads, SHA-256-verifies, and unpacks a JRE archive; evicts oldest past `MaxRetainedVersions=2`. | Shared by the installer and `maintain.exe` — "JRE acquisition is not duplicated logic in Rigger" (§12). Its `DownloadVerified`/`EvictOldest` primitives are exported and reused by `jarprovision` rather than duplicated. |
+| `jreprovision` | Downloads, SHA-256-verifies, and unpacks a JRE archive; evicts oldest past `MaxRetainedVersions=2`. | Shared by the installer (`ProvisionLocal`, a local archive) and `cmd/rigger` itself (`Provision`, an in-process network fetch through a caller-supplied `*http.Client`) — "JRE acquisition is not duplicated logic in Rigger" (§12) means the routine is shared, not that it must run out-of-process. Its `DownloadVerified`/`EvictOldest` primitives are exported and reused by `jarprovision` rather than duplicated. |
 | `jarprovision` | The app-jars analogue of `jreprovision`: fetches/verifies/unpacks the version directory `cmd/rigger` finds missing on disk, evicting old versions past `MaxRetainedVersions=2`. | Always runs regardless of `PackageMode` (unlike JRE/rigger.exe self-update) — jars are the always-on channel (§9b/§13-14). Eviction filters on `layout.IsVersionDir` since the install root, unlike `jre/`, also holds Rigger's own fixed files. |
 | `javainvoke` | Resolves the classpath (including glob entries) and execs `javaw.exe` as a detached process. | Rigger execs and exits — it does not supervise the JVM. |
 | `uriparse` | Parses a protocol-handler invocation URI and extracts query params. | Matches against the app's own registered scheme specifically (not "does this look URI-shaped") — a bare Windows drive letter parses as scheme `c` otherwise. |
@@ -324,12 +361,14 @@ package, which `cmd/installer`/`cmd/uninstaller` actually use.
    protocol-handler invocation (`uriparse.Parse`); otherwise a plain shortcut launch.
 5. If the invocation carries a `networkZone` query param that doesn't match the registry's
    `NetworkZone`, log a warning (non-fatal consistency check, not a lookup — §17-18 Round 8 Q1).
-6. Build a proxy-routed `http.Client` (`proxydetect.Client`) from the registry's
-   `ProxyHost`/`ProxyPort`.
+6. Build two proxy-routed `http.Client`s (`proxydetect.Client`) from the registry's
+   `ProxyHost`/`ProxyPort`: a short-timeout one for the manifest poll, a long-timeout one for the
+   on-demand archive fetches in steps 8-9.
 7. `loadManifest`: load the local cache, then best-effort refresh from `ManifestServerUrl`
    (falling back silently to cache on failure — §2.10).
-8. Confirm the manifest's required JRE directory exists on disk; fail clearly if not (Phase 8
-   on-demand provisioning is unimplemented).
+8. Confirm the manifest's required JRE directory exists on disk; if not and `PackageMode` is
+   `Dynamic`, fetch/verify/extract it in-process via `jreprovision.Provision` (§2.9c), failing
+   clearly if `PackageMode` is `Static` or provisioning doesn't succeed.
 9. Confirm the manifest's version directory exists on disk; if not, fetch and unpack it via
    `jarprovision.Provision` (§2.9b) before continuing — this fetch is unconditional, not gated on
    `PackageMode`.
@@ -349,8 +388,8 @@ also recorded via `logger.LogFatal` before `main()` reports it through `uierror.
 | `cmd/installer` — full §16 flow, console UI | **Implemented, manually verified end-to-end** (real install, real registry/shortcuts/protocol handler) |
 | `cmd/uninstaller` — self-copy-and-relaunch teardown | **Implemented, manually verified end-to-end** (confirmed complete removal) |
 | `internal/*` packages listed in §3 (all but the three remaining placeholders) | **Implemented, unit-tested** |
-| `internal/jreprovision`'s on-demand invocation from a *running* Rigger (Dynamic mode) | Not implemented — `TODO(Phase 8)` stub. `ProvisionLocal` (installer/upgrade-in-place) is implemented; only the "Rigger calls `maintain.exe` mid-launch" path is missing. |
-| `cmd/maintain` | Not implemented — empty placeholder |
+| `internal/jreprovision`'s on-demand invocation from a *running* Rigger (Dynamic mode), in-process (§2.9c) | **Implemented, manually verified end-to-end** — `cmd/rigger` calls `jreprovision.Provision` directly when the required JRE is missing and `PackageMode` is `Dynamic`. |
+| `rigger.exe` binary self-update | Not implemented — no manifest/appconfig field exists yet to declare a rigger.exe version/download location (§2.9c) |
 | `internal/wizard` (WebView2 UI shell) | Not implemented — nothing in this repo uses a UI toolkit yet; `cmd/installer`/`cmd/uninstaller` use plain console I/O instead |
 | Doctor / diagnostic mode | Requirement documented (`REQUIREMENTS.md` §19-20b); not implemented |
 | Jar delivery via Rigger fetching from `ManifestServerUrl` (§9, `internal/jarprovision`) | **Implemented, unit-tested** — `cmd/rigger` fetches/unpacks a missing version directory before launch, verified by checksum, evicting old versions past `MaxRetainedVersions=2`. |
@@ -383,16 +422,19 @@ also recorded via `logger.LogFatal` before `main()` reports it through `uierror.
 
 Roughly in dependency order:
 
-1. **`cmd/maintain`** — the on-demand JRE/rigger self-update companion for Dynamic-mode installs;
-   depends on nothing new (can reuse `internal/jreprovision.Provision`, already implemented),
-   just needs `cmd/rigger`'s `TODO(Phase 8)` stub wired to actually invoke it.
-2. **`internal/wizard`** (WebView2 embed, §11b) — first real UI in the codebase; a prerequisite
+1. **`internal/wizard`** (WebView2 embed, §11b) — first real UI in the codebase; a prerequisite
    for both slow-operation progress feedback and doctor mode. `cmd/installer`/`cmd/uninstaller`
    work today with plain console I/O, so this is a visual-polish upgrade, not a functional gap.
-3. **Doctor/diagnostic mode** (§19-20b) — has several genuinely open questions (invocation
+2. **Doctor/diagnostic mode** (§19-20b) — has several genuinely open questions (invocation
    trigger, exact network-test semantics, log-collection format) that need resolving before
    implementation.
+3. **`rigger.exe` binary self-update** (§13) — needs a new manifest/appconfig field to declare a
+   rigger.exe version + download location + checksum (analogous to `RuntimeSpec`), which is a real
+   schema decision, not implemented speculatively alongside the JRE-provisioning work (§2.9c).
+   When it is built, it won't need a companion exe either — see §2.9c's self-copy-relaunch note.
 
 Jar delivery via Rigger (§9) — previously the top item here — is now implemented
 (`internal/jarprovision`, §2.9b); the full `stagebuild` → install → launch pipeline works end to
-end with real application code, not just the launcher/runtime/registration plumbing.
+end with real application code, not just the launcher/runtime/registration plumbing. On-demand JRE
+provisioning (§12-14) — the item after that — is also now implemented, in-process inside
+`cmd/rigger` rather than via a separate `cmd/maintain` binary (§2.9c, §22).

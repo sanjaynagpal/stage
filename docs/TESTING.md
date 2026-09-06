@@ -147,7 +147,46 @@ and confirm the line count grows):
 - `%AppData%\ABC\abc-launch.log` — the fixture Java app's own report of what it received
   (arguments and the `abc.*` system properties Rigger injected).
 
-### 2.5 Clean up
+### 2.6 Testing on-demand JRE provisioning (Dynamic package mode)
+
+`setup-dev-install.ps1` (§2.1) already sets `PackageMode=Dynamic` in the registry and, alongside
+the local `jre/<version>` copy, zips the same JDK into a servable archive at
+`examples/abc/fakeserver/served/abc/jre/<version>-win-x64.zip` with the manifest's
+`runtime.sha256` set to its real checksum — everything needed to exercise Rigger's on-demand,
+in-process JRE fetch (`internal/jreprovision.Provision`, docs/REQUIREMENTS.md §12-14, §22) without
+a second JDK version.
+
+**Trigger a real fetch**: with fakeserver running (§2.2), delete the local JRE directory and
+launch:
+```powershell
+Remove-Item -Recurse -Force "$env:LocalAppData\ABC\jre\<version>"
+& "$env:LocalAppData\ABC\rigger.exe"
+```
+Expect console output like:
+```
+rigger: launching ABC v1.0.0 (invoked via shortcut)
+rigger: loaded manifest v1.0.0 (fresh fetch from http://127.0.0.1:8080/abc/manifest.json)
+rigger: required Java runtime <version> not found at C:\Users\<you>\AppData\Local\ABC\jre\<version> — fetching from http://127.0.0.1:8080/abc/jre/<version>-win-x64.zip
+rigger: provisioned Java runtime <version>
+rigger: using Java <version> at C:\Users\<you>\AppData\Local\ABC\jre\<version>
+rigger: launching ABC 1.0.0 (mainClass=com.example.abc.Main)
+```
+All of this happens inside the single `rigger.exe` process — there's no companion exe and no
+second log source; `rigger.log` shows the same lines as the console.
+
+**Static package mode fails immediately instead of fetching**: set
+`HKCU:\Software\ABC\PackageMode` to `Static` (`Set-ItemProperty -Path HKCU:\Software\ABC -Name
+PackageMode -Value Static`), delete the JRE directory again, and launch. Expect an immediate
+fatal error naming the missing runtime with no fetch attempt logged, matching the pre-existing
+failure behavior. Set `PackageMode` back to `Dynamic` afterward.
+
+**Checksum mismatch**: with `PackageMode` back to `Dynamic` and the JRE directory deleted, edit
+`examples/abc/fakeserver/served/abc/manifest.json`'s `runtime.sha256` to any other 64-hex-char
+value, then launch. Expect a fatal error naming the checksum mismatch, and confirm the JRE
+directory was not created. Restore the correct checksum afterward (rerun
+`setup-dev-install.ps1`, which recomputes and rewrites it).
+
+### 2.7 Clean up
 
 Kill any leftover processes after testing:
 ```powershell

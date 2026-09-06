@@ -7,7 +7,8 @@
   "artifactSha256": "__ARTIFACT_SHA256__",
   "runtime": {
     "javaVersion": "__JAVA_VERSION__",
-    "path": "jre/__JAVA_VERSION__"
+    "path": "jre/__JAVA_VERSION__",
+    "sha256": "__JRE_SHA256__"
   },
   "classpath": ["1.0.0/app.jar"],
   "mainClass": "com.example.abc.Main",

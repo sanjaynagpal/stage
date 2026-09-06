@@ -1,6 +1,8 @@
 # Prepares real fixtures for testing cmd/stagebuild end to end: zips the
-# local JDK (from JAVA_HOME) into a JRE archive, computes its checksum,
-# builds the ABC fixture jar and zips it into the artifacts archive
+# local JDK (from JAVA_HOME) into a JRE archive, computes its checksum, also
+# copies that archive to fakeserver's servable jre/ location for testing
+# Rigger's own in-process on-demand JRE provisioning (docs/REQUIREMENTS.md
+# §12-14, §22), builds the ABC fixture jar and zips it into the artifacts archive
 # fakeserver serves for Rigger's on-demand jar fetch (internal/jarprovision,
 # docs/REQUIREMENTS.md §9 — the gap that used to make a real install's
 # "Launch now" fail), and writes resolved (placeholder-substituted) copies
@@ -33,6 +35,13 @@ Compress-Archive -Path (Join-Path $env:JAVA_HOME "*") -DestinationPath $zipPath 
 $sha256 = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
 Write-Host "SHA256: $sha256"
 
+Write-Host "`nCopying the JRE archive to fakeserver's servable jre/ location (matches"
+Write-Host "Manifest.DownloadURL()'s convention, for testing Rigger's own in-process"
+Write-Host "on-demand provisioning against a real stagebuild-built install)..."
+$jreServedDir = Join-Path $abcDir "fakeserver/served/abc/jre"
+New-Item -ItemType Directory -Force -Path $jreServedDir | Out-Null
+Copy-Item -Force $zipPath (Join-Path $jreServedDir "$javaVersion-win-x64.zip")
+
 Write-Host "`nBuilding the ABC fixture app..."
 & (Join-Path $abcDir "java/build.ps1")
 
@@ -47,7 +56,7 @@ Write-Host "Artifact SHA256: $artifactSha256"
 
 Write-Host "`nWriting manifest.generated.json..."
 $manifestTemplate = Get-Content (Join-Path $abcDir "fakeserver/public/abc/manifest.json") -Raw
-$manifestResolved = $manifestTemplate.Replace("__JAVA_VERSION__", $javaVersion).Replace("__ARTIFACT_SHA256__", $artifactSha256)
+$manifestResolved = $manifestTemplate.Replace("__JAVA_VERSION__", $javaVersion).Replace("__ARTIFACT_SHA256__", $artifactSha256).Replace("__JRE_SHA256__", $sha256)
 Set-Content -Path (Join-Path $abcDir "manifest.generated.json") -Value $manifestResolved -NoNewline
 
 Write-Host "`nWriting fakeserver-served copy of the manifest..."

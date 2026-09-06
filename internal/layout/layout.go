@@ -35,8 +35,8 @@ func DataDir(appID string) string {
 // AppIDFromExePath derives an app id from an installed component's own
 // location: the root app folder is always named after the app, so the
 // directory containing the exe IS the app id (docs/REQUIREMENTS.md §3-4).
-// This lets rigger.exe/maintain.exe/unins.exe be generic, prebuilt-once
-// binaries with zero per-app compiled state.
+// This lets rigger.exe/unins.exe be generic, prebuilt-once binaries with
+// zero per-app compiled state.
 func AppIDFromExePath(exePath string) string {
 	return filepath.Base(filepath.Dir(exePath))
 }
@@ -68,7 +68,6 @@ var reservedRootEntries = map[string]bool{
 	"jre":                 true,
 	"rigger.exe":          true,
 	"unins.exe":           true,
-	"maintain.exe":        true,
 	"manifest.json":       true,
 	"app.ico":             true,
 	"install-record.json": true,
@@ -104,11 +103,6 @@ func RiggerLogPath(dataDir string) string {
 // RiggerExePath returns rigger.exe's path under root.
 func RiggerExePath(root string) string {
 	return filepath.Join(root, "rigger.exe")
-}
-
-// MaintainExePath returns the companion maintenance exe's path under root.
-func MaintainExePath(root string) string {
-	return filepath.Join(root, "maintain.exe")
 }
 
 // UninstallerExePath returns the uninstaller's path under root.

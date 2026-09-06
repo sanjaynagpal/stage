@@ -576,3 +576,29 @@ retention policy TBD") and implements the jar-delivery mechanism §9 already dec
   already builds for the manifest refresh (§17-18), not a bare client — a live per-launch network
   call from an ordinary user session has the same proxy-correctness requirement as the manifest
   fetch does.
+
+## 22. Decisions (Round 11 — dropping the `cmd/maintain` companion exe) — CONFIRMED, SUPERSEDES §13
+
+§13's "Invocation mechanism" decision ("a small companion maintenance executable... which Rigger
+invokes when a needed JRE/rigger.exe update isn't present") was implemented once
+(`cmd/maintain`/`maintain.exe`) and then reverted after review: shipping and installing a third
+executable alongside `rigger.exe`/`unins.exe` was judged not advisable — every additional exe on
+the client machine needs its own Authenticode signature and has to separately build up
+AV/SmartScreen reputation, an ongoing operational cost with no matching benefit here. An
+uninstaller exe remains accepted as necessary (a Windows install directory genuinely can't delete
+its own running exe), but a *second* generic companion binary is not.
+
+- **On-demand JRE provisioning now runs in-process inside `rigger.exe`** (`internal/jreprovision.
+  Provision`, called directly from `cmd/rigger`'s `run()`), not via a subprocess. The constraint
+  that originally motivated a separate process — a running program generally can't overwrite its
+  own executable file — doesn't apply here: provisioning a JRE writes into `jre/<version>`, never
+  into `rigger.exe`'s own file, so there is no structural reason it needs to run out-of-process.
+- **`rigger.exe` binary self-update** (the other half of §13's framing, still unimplemented per
+  §21/§7) will **not** get a dedicated companion exe either when it's eventually built. It will
+  reuse the self-copy-to-`%TEMP%`-and-relaunch pattern `unins.exe` already uses on itself:
+  `rigger.exe` copies itself to `%TEMP%`, runs that copy with a flag, the copy overwrites the real
+  `rigger.exe` in the install root, then relaunches it. No new binary is shipped or signed; the
+  `%TEMP%` copy is transient, not an installed artifact.
+- **`cmd/maintain` is deleted**, not left as an empty placeholder — unlike `internal/wizard`/
+  `internal/signing`/`internal/riggerupdate`, which remain reserved for genuinely unresolved future
+  work, this direction was tried, reconsidered, and is not the intended design going forward.

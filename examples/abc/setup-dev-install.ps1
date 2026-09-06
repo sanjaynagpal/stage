@@ -75,9 +75,25 @@ if (-not (Test-Path $jreDir)) {
     Write-Host "`n$jreDir already exists, skipping JDK copy."
 }
 
+# Also zip the JDK into fakeserver's servable jre/ location, matching
+# Manifest.DownloadURL()'s convention, so Rigger's own in-process on-demand
+# JRE provisioning (internal/jreprovision.Provision, docs/REQUIREMENTS.md
+# §12-14, §22) can be manually tested by deleting $jreDir and relaunching —
+# see docs/TESTING.md.
+$jreArchivePath = Join-Path $abcDir "fakeserver/served/abc/jre/$javaVersion-win-x64.zip"
+if (-not (Test-Path $jreArchivePath)) {
+    Write-Host "`nZipping local JDK into $jreArchivePath for on-demand provisioning testing (one-time, may take a minute)..."
+    New-Item -ItemType Directory -Force -Path (Split-Path $jreArchivePath) | Out-Null
+    Compress-Archive -Path (Join-Path $env:JAVA_HOME "*") -DestinationPath $jreArchivePath -CompressionLevel Optimal
+} else {
+    Write-Host "`n$jreArchivePath already exists, skipping JRE zip."
+}
+$jreSha256 = (Get-FileHash -Path $jreArchivePath -Algorithm SHA256).Hash.ToLower()
+Write-Host "JRE SHA256: $jreSha256"
+
 Write-Host "`nWriting manifest.json (local cache + fakeserver-served copy)..."
 $template = Get-Content (Join-Path $abcDir "fakeserver/public/abc/manifest.json") -Raw
-$substituted = $template.Replace("__JAVA_VERSION__", $javaVersion).Replace("__ARTIFACT_SHA256__", $artifactSha256)
+$substituted = $template.Replace("__JAVA_VERSION__", $javaVersion).Replace("__ARTIFACT_SHA256__", $artifactSha256).Replace("__JRE_SHA256__", $jreSha256)
 Set-Content -Path (Join-Path $installRoot "manifest.json") -Value $substituted -NoNewline
 
 $servedDir = Join-Path $abcDir "fakeserver/served/abc"
@@ -115,3 +131,5 @@ Write-Host "  4. Same, but with a mismatched Network Zone to see the consistency
 Write-Host "       & '$installRoot\rigger.exe' '${protocolScheme}://launch?token=demo123&networkZone=Radianz'"
 Write-Host "  5. Log written to: $dataDir\abc-launch.log"
 Write-Host "  6. Rigger's own log: $dataDir\rigger.log"
+Write-Host "  7. To test on-demand JRE provisioning (in-process, PackageMode=Dynamic here),"
+Write-Host "     delete $installRoot\jre\$javaVersion and relaunch — see docs/TESTING.md §2.6"

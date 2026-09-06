@@ -1,9 +1,9 @@
 // Package uierror reports a fatal error to the end user from a
-// windowsgui-subsystem binary (rigger.exe, maintain.exe, uninstaller.exe)
-// that has no console to print to. It shows a native message box so a
-// launch failure is never silent, and also writes to stderr, which is
-// harmless (goes nowhere) when no console is attached but helpful during
-// development/manual testing.
+// windowsgui-subsystem binary (rigger.exe, uninstaller.exe) that has no
+// console to print to. It shows a native message box so a launch failure is
+// never silent, and also writes to stderr, which is harmless (goes nowhere)
+// when no console is attached but helpful during development/manual
+// testing.
 package uierror
 
 import (

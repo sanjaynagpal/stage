@@ -68,9 +68,17 @@ other GOOS values.
   Windows install dir can't delete its own running exe): copies itself to `%TEMP%`, re-execs with
   `--finish-uninstall`, then that copy reads `internal/payload.InstallRecord` to know exactly what
   to unregister/remove.
-- **`cmd/maintain`** (placeholder, not yet implemented) — the on-demand maintenance companion exe
-  for JRE/rigger self-update in Dynamic package mode (§12-14); `cmd/rigger`'s missing-JRE path is
-  still a `TODO(Phase 8)` stub pending this.
+Stage ships exactly two binaries per install — `rigger.exe` and `unins.exe`. There is
+deliberately **no third companion exe**: on-demand JRE provisioning in Dynamic package mode
+(§12-14) runs in-process inside `rigger.exe` (`internal/jreprovision.Provision`, called directly),
+not via a separate `cmd/maintain` binary — see REQUIREMENTS.md §22 (Round 11), which superseded
+§13's original "companion maintenance executable" call after review: every additional shipped exe
+needs its own Authenticode signature and AV/SmartScreen reputation, and the constraint that
+motivated a separate process (a program generally can't overwrite its own running executable)
+doesn't apply to JRE provisioning, which never touches `rigger.exe`'s own file. `rigger.exe`
+binary self-update itself is still unimplemented (no manifest/appconfig field yet declares a
+rigger.exe version/URL/checksum); when built, it's expected to reuse `unins.exe`'s own
+self-copy-to-`%TEMP%`-and-relaunch trick rather than introduce a new binary.
 
 ### Registry is the source of truth Rigger reads, not re-derives
 
@@ -109,10 +117,11 @@ Dynamic. This switch governs *only* `rigger.exe`/JRE binary updates — jars/man
 (`Provision` downloads from a URL; `ProvisionLocal` verifies an already-on-disk archive) —
 `MaxRetainedVersions=2` eviction runs identically either way, since `cmd/installer` calling
 `ProvisionLocal` handles *both* a fresh install and an upgrade-in-place re-run (a re-run of the
-installer is not a "no eviction needed" special case). `maintain.exe`'s future on-demand fetch
-(when a *running* Rigger finds a manifest wants a JRE version not on disk) would use `Provision`
-— per §12, "JRE acquisition is not duplicated logic in Rigger." `cmd/rigger/main.go`'s own
-missing-JRE path is still a `TODO(Phase 8)` stub pending `cmd/maintain` existing.
+installer is not a "no eviction needed" special case). `cmd/rigger/main.go` calls `Provision`
+directly, in-process, when a *running* Rigger finds a manifest wants a JRE version not on disk and
+`PackageMode` is `Dynamic` — per §12, "JRE acquisition is not duplicated logic in Rigger" means the
+routine is shared, not that it has to run out-of-process. The same download-and-verify core
+(`DownloadVerified`) is also reused by `internal/jarprovision` for on-demand app-jar delivery.
 
 ### Protocol-handler launch path
 
@@ -182,12 +191,14 @@ lookup table; one install always has exactly one zone/proxy pair.
 
 ### Remaining empty placeholder packages
 
-Four directories are still empty, reserved for planned work per `docs/REQUIREMENTS.md` — not
+Three directories are still empty, reserved for planned work per `docs/REQUIREMENTS.md` — not
 accidentally-empty or safe to repurpose without checking intent first: `internal/wizard` (the
 future WebView2 UI shell), `internal/signing` (Authenticode — `stagebuild` reads
-`AppConfig.Signing` but only warns that it's unimplemented rather than acting on it),
-`internal/riggerupdate`, and `cmd/maintain`. `internal/uninstallkey` is also still empty and
-likely vestigial — its intended purpose (the standard Add/Remove Programs Uninstall key) turned
+`AppConfig.Signing` but only warns that it's unimplemented rather than acting on it), and
+`internal/riggerupdate`. (`cmd/maintain` was tried and deliberately removed — see above — not
+left as a placeholder; that's a different situation from these three.) `internal/uninstallkey` is
+also still empty and likely vestigial — its intended purpose (the standard Add/Remove Programs
+Uninstall key) turned
 out to already be fully covered by `internal/winreg.WriteUninstallValues`/`DeleteUninstallValues`,
 which predates this package and is what `cmd/installer`/`cmd/uninstaller` actually use; check
 before assuming it needs filling in.
