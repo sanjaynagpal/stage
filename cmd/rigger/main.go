@@ -32,6 +32,15 @@ import (
 const zoneURIParam = "networkZone"
 
 func main() {
+	// --doctor is checked directly against argv[1] (not the flag package)
+	// so it doesn't interfere with the protocol-handler URI detection just
+	// below, which also inspects argv[1] raw (docs/REQUIREMENTS.md §24).
+	if len(os.Args) > 1 && os.Args[1] == "--doctor" {
+		if err := runDoctor(); err != nil {
+			uierror.Fatalf("Diagnostics Failed", "%v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		uierror.Fatalf("Application Launch Failed", "%v", err)
 	}

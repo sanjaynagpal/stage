@@ -25,7 +25,7 @@ config and manifest.
 
 | Binary | Status | Role |
 |---|---|---|
-| `rigger.exe` (`cmd/rigger`) | **Implemented** | Generic, prebuilt-once launcher. Zero per-app compiled state — derives its app identity from its own install folder name. |
+| `rigger.exe` (`cmd/rigger`) | **Implemented** | Generic, prebuilt-once launcher. Zero per-app compiled state — derives its app identity from its own install folder name. Also doubles as the diagnostic entry point via `--doctor` (§2.9e). |
 | `stagebuild` (`cmd/stagebuild`) | **Implemented** | Per-app build tool; consumes an `appconfig.AppConfig` and really compiles `cmd/installer` fresh per (Environment, NetworkZone) pair, with that build's payload embedded via `go:embed`. |
 | the generated installer (`cmd/installer`) | **Implemented** (polished terminal UI by default, `-gui` for a browser wizard — §23) | Runs the full §16 flow — prerequisite checks, extraction, registry writes, protocol-handler/file-association/shortcut registration. |
 | the uninstaller (`cmd/uninstaller`, `unins.exe`) | **Implemented** (minimal console UI) | Self-copy-and-relaunch teardown: removes files, registry keys, protocol handler, file associations, shortcuts. |
@@ -172,12 +172,11 @@ skipped — so `cmd/rigger` never needs a nil-check at each call site. `LogFatal
 **file-only** (never console): `main()`'s `uierror.Fatalf` already reports a fatal error to the
 user, so reusing `Warn` there would double-print it.
 
-A much larger interactive **doctor/diagnostic mode** (network reachability checks, registry/JRE
-integrity validation, log collection, a `mailto:`-based "contact support" action, a UI for
-anything slow) is a documented-but-deferred requirement — see `REQUIREMENTS.md` §19-20b — not
-built yet. It was originally planned to reuse an embedded WebView2 shell (§11b); that approach
-was abandoned (§23, superseding §11b) in favor of `internal/tui`/`internal/wizard`, so any future
-doctor-mode work should target those instead, re-evaluating reuse feasibility at that time.
+A much larger interactive **doctor mode** (network reachability checks, registry/JRE integrity
+validation, log collection, a `mailto:`-based "contact support" action) is implemented as
+`rigger.exe --doctor` — see `REQUIREMENTS.md` §19-20b, §24, and §2.9e below for the detail. It was
+originally planned to reuse an embedded WebView2 shell (§11b); that approach was abandoned (§23,
+superseding §11b) in favor of `internal/wizard`.
 
 ### 2.9 stagebuild → installer → uninstaller pipeline
 
@@ -333,6 +332,45 @@ Both are genuinely unit-testable — `internal/tui` by feeding messages into `Up
 on the resulting model, `internal/wizard` by driving its handlers with `httptest` — unlike the
 abandoned WebView2 approach, which had no path to automated testing at all.
 
+### 2.9e Doctor mode (`rigger.exe --doctor`)
+
+§20b's four implementation-blocking questions are resolved in §24. `rigger.exe --doctor` (checked
+directly against `argv[1]`, not the `flag` package, so it doesn't interfere with the existing
+protocol-handler URI detection) runs `internal/doctor.Run(appID)` — pure diagnostic logic, no UI
+— which degrades gracefully at every step rather than erroring out:
+
+1. `winreg.ReadAppValues` — if this fails (the worst case doctor mode exists to help with), `Run`
+   returns immediately with a single failed "Registry" check naming the fix (reinstall); nothing
+   else can be checked without `InstallDir`/`DataDir`, so a short report here is correct, not
+   broken.
+2. `InstallDir`/`DataDir` existence (`os.Stat`).
+3. The cached manifest loads, and — if it does — the JRE directory it names actually contains
+   `javaw.exe`, not just that the directory exists ("deep validation," §24).
+4. A full HTTP GET against `ManifestServerUrl`, parsed as a manifest (success = HTTP 200 + valid
+   JSON, not a bare TCP connect), through the registry's already-resolved proxy — no live
+   `internal/proxydetect` re-run, no exception to §18's "Rigger never re-detects" principle.
+
+`internal/doctor.CollectLogs(dataDir)` then zips every `*.log` file found directly under
+`DataDir` (`rigger.log` plus whatever the launched app itself writes there, e.g. the fixture's
+`abc-launch.log` — no app-specific filename is hardcoded) into
+`<DataDir>/diagnostics-<timestamp>.zip`.
+
+`cmd/rigger/doctor.go` converts the `doctor.Report` into `internal/wizard.DoctorReport` and calls
+`wizard.ShowDoctorReport` — reusing `internal/wizard` rather than `internal/tui` specifically so
+this rarely-used mode doesn't pull `bubbletea`/`lipgloss` into `rigger.exe`'s every-launch binary;
+`internal/wizard` is stdlib-only. Unlike the installer wizard's multi-screen, blocking-call flow,
+`ShowDoctorReport` renders one static, already-fully-computed page (the checks are fast enough
+that no progress UI is needed — §19's "potentially slow" framing predates knowing what the actual
+checks would be) and waits on the same heartbeat idiom for the browser closing — but where the
+installer wizard treats that as a failure to abort on, here it's doctor mode's normal, expected
+end, so `ShowDoctorReport` simply returns rather than exiting the process. A `supportEmail`
+manifest field (new, optional) drives the "Contact Support" `mailto:` link (§20's decided
+mechanism; §24 decided where the address comes from) — a real percent-encoding fix is applied to
+its query string (`url.Values.Encode()` uses `+` for space; RFC 6068 wants `%20`).
+
+Manually verified end-to-end on a real install, including forcing the worst case (a corrupted
+registry value) and confirming a single clear failed check is rendered rather than a crash.
+
 ### 2.10 Update model
 
 Two independent channels, regardless of package mode:
@@ -379,7 +417,8 @@ Two independent channels, regardless of package mode:
 | `shortcut` | Creates/removes `.lnk` files via raw COM (`IShellLinkW`/`IPersistFile`). | `golang.org/x/sys/windows` has no COM bindings beyond `CoInitializeEx`/`GUID` — binds `CoCreateInstance` manually and drives vtables directly. Verified against an independent `WScript.Shell` readback, not just "didn't crash." |
 | `console` | Minimal `Confirm`/`RetryCancel`/`ReadLine` prompts — `cmd/uninstaller`'s UI (§2.9d: `cmd/installer` now uses `internal/tui`/`internal/wizard` instead). | Fully unit-testable by feeding a fake stdin; no real console needed. |
 | `tui` | `cmd/installer`'s default UI: a Bubble Tea/Lipgloss terminal wizard implementing `installerUI` (§2.9d, §23). | This repo's first third-party Go dependency beyond `golang.org/x/sys`, deliberately accepted since the terminal path is now permanent, not a stand-in. Tested by feeding messages into `Update`. |
-| `wizard` | `cmd/installer`'s `-gui` UI: a local `net/http` server + HTMX opened as a browser "app window," implementing `installerUI` (§2.9d, §23). | No COM, no message loop, no native binary dependency — HTMX is checked-in JS source. Tested with `httptest`. |
+| `wizard` | `cmd/installer`'s `-gui` UI (§2.9d, §23) and `rigger.exe --doctor`'s results page (§2.9e, §24) — a local `net/http` server + HTMX opened as a browser "app window." | No COM, no message loop, no native binary dependency — HTMX is checked-in JS source. Tested with `httptest`. |
+| `doctor` | Pure diagnostic logic behind `rigger.exe --doctor` — registry/JRE/manifest-server checks, log collection (§2.9e, §24). No UI; `internal/wizard` renders its `Report`. | Degrades gracefully at every step — even a failed registry read returns a usable (short) report rather than an error. Unit-tested except the registry read itself. |
 
 `internal/riggerupdate` and `internal/signing` remain empty placeholder packages (reserved for
 planned work per `REQUIREMENTS.md`) — not accidentally empty, not safe to repurpose without
@@ -432,7 +471,7 @@ also recorded via `logger.LogFatal` before `main()` reports it through `uierror.
 | `internal/jreprovision`'s on-demand invocation from a *running* Rigger (Dynamic mode), in-process (§2.9c) | **Implemented, manually verified end-to-end** — `cmd/rigger` calls `jreprovision.Provision` directly when the required JRE is missing and `PackageMode` is `Dynamic`. |
 | `rigger.exe` binary self-update | Not implemented — no manifest/appconfig field exists yet to declare a rigger.exe version/download location (§2.9c) |
 | `internal/tui` / `internal/wizard` (`cmd/installer`'s two UIs, §2.9d) | **Implemented, unit-tested, manually verified end-to-end** — supersedes the originally planned embedded-WebView2 shell (§23) |
-| Doctor / diagnostic mode | Requirement documented (`REQUIREMENTS.md` §19-20b); not implemented |
+| Doctor mode (`rigger.exe --doctor`, `internal/doctor`, §2.9e, §24) | **Implemented, unit-tested, manually verified end-to-end** — including the worst case (a corrupted registry value) rendering one clear failed check rather than crashing. |
 | Jar delivery via Rigger fetching from `ManifestServerUrl` (§9, `internal/jarprovision`) | **Implemented, unit-tested** — `cmd/rigger` fetches/unpacks a missing version directory before launch, verified by checksum, evicting old versions past `MaxRetainedVersions=2`. |
 
 ## 6. Testing & Verification
@@ -461,17 +500,16 @@ also recorded via `logger.LogFatal` before `main()` reports it through `uierror.
 
 ## 7. Known Gaps & Next Steps
 
-Roughly in dependency order:
+The one remaining gap:
 
-1. **Doctor/diagnostic mode** (§19-20b) — has several genuinely open questions (invocation
-   trigger, exact network-test semantics, log-collection format) that need resolving before
-   implementation; also needs to pick a UI approach now that the originally planned WebView2
-   shell it was going to reuse doesn't exist (§23) — `internal/tui`/`internal/wizard` are the
-   candidates to re-evaluate.
-2. **`rigger.exe` binary self-update** (§13) — needs a new manifest/appconfig field to declare a
+1. **`rigger.exe` binary self-update** (§13) — needs a new manifest/appconfig field to declare a
    rigger.exe version + download location + checksum (analogous to `RuntimeSpec`), which is a real
    schema decision, not implemented speculatively alongside the JRE-provisioning work (§2.9c).
    When it is built, it won't need a companion exe either — see §2.9c's self-copy-relaunch note.
+
+Doctor mode (§19-20b) — previously the top item here — is now implemented (`rigger.exe --doctor`,
+`internal/doctor`, §2.9e, §24), reusing `internal/wizard` rather than the originally planned
+WebView2 shell (§23).
 
 Jar delivery via Rigger (§9) — previously the top item here — is now implemented
 (`internal/jarprovision`, §2.9b); the full `stagebuild` → install → launch pipeline works end to

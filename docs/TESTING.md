@@ -210,6 +210,18 @@ go run .\cmd\stagebuild -config examples\abc\appconfig.generated.json -env PROD 
 ```
 Produces `dist\ABCSetup.exe`.
 
+**Before testing "Launch now?" at the end of either UI below, start fakeserver** (separate
+shell, from the repo root):
+```powershell
+go run .\examples\abc\fakeserver -dir examples\abc\fakeserver\served
+```
+Stage never bundles app jars (§9) — the installer lays down `rigger.exe`, a JRE, and the
+manifest only, and Rigger fetches jars itself on first launch from the manifest server
+(`internal/jarprovision`, §2.9b). If fakeserver isn't running, expect a single clear fatal error
+naming a refused connection to `127.0.0.1:8080` — correct, intended behavior (§9: "there is no
+fully-offline first run"), not a bug. Confirm this is the failure you see before assuming
+anything else is wrong; `%AppData%\ABC\rigger.log` will show exactly this.
+
 ### 3.2 Terminal UI (default)
 
 ```powershell
@@ -243,3 +255,31 @@ Remove-Item -Path HKCU:\Software\ABC -Recurse -Force -ErrorAction SilentlyContin
 Leave any Edge windows open unless you're certain they were opened by this test — `-gui` opens a
 normal `msedge.exe` process, indistinguishable from the operator's own browsing session by image
 name alone.
+
+## 4. Manual end-to-end test: `rigger.exe --doctor`
+
+Uses the same per-user install `setup-dev-install.ps1` (§2.1) creates. Start fakeserver first
+(§2.2) — the "Manifest server" check needs it running to show as reachable.
+
+```powershell
+& "$env:LocalAppData\ABC\rigger.exe" --doctor
+```
+Expect a console line (`Opening diagnostics in your browser: ...`) and a browser window showing
+every check green: Registry, Install directory, Data directory, Manifest, Java runtime, Manifest
+server, Proxy, Network zone — plus "Diagnostic logs saved to: ..." naming a new
+`<DataDir>\diagnostics-<timestamp>.zip`. Confirm that zip contains both `rigger.log` and
+`abc-launch.log`.
+
+**Forced failures** (confirm doctor mode reports each clearly instead of crashing, then restore):
+- Rename `%LocalAppData%\ABC\jre\<version>` — expect "Java runtime" to fail, naming the missing
+  `javaw.exe` path, with every other check still shown normally.
+- Stop fakeserver — expect "Manifest server" to fail with a connection error, everything else
+  unaffected.
+- Delete a required value from `HKCU:\Software\ABC` (e.g. `InstallScope`) — expect the page to
+  show **only** a single failed "Registry" check naming reinstall as the fix, not a crash and not
+  a partial report of the other checks (nothing else can be determined without a readable
+  registry key).
+
+Since the fixture manifest doesn't declare `supportEmail`, expect no "Contact Support" button —
+correct, not a bug. To see it, add `"supportEmail": "support@example.com"` to
+`examples/abc/fakeserver/public/abc/manifest.json` and rerun `setup-dev-install.ps1`.
