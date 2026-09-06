@@ -61,6 +61,26 @@ func VersionDir(root, version string) string {
 	return filepath.Join(root, version)
 }
 
+// reservedRootEntries lists every non-version-directory item Stage places
+// directly under the install root, so eviction logic (internal/jarprovision)
+// can tell a stale app-version folder apart from Rigger's own fixed files.
+var reservedRootEntries = map[string]bool{
+	"jre":                 true,
+	"rigger.exe":          true,
+	"unins.exe":           true,
+	"maintain.exe":        true,
+	"manifest.json":       true,
+	"app.ico":             true,
+	"install-record.json": true,
+}
+
+// IsVersionDir reports whether name (a direct child of the install root) is
+// an app-version directory rather than one of Stage's own fixed files or
+// folders — i.e. whether it's safe for jar eviction to remove wholesale.
+func IsVersionDir(name string) bool {
+	return !reservedRootEntries[name]
+}
+
 // ManifestPath returns the local cached manifest.json path under root.
 func ManifestPath(root string) string {
 	return filepath.Join(root, "manifest.json")

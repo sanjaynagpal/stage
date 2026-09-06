@@ -12,6 +12,7 @@ func validManifest() *Manifest {
 		Version:           "1.5.0",
 		Environment:       EnvProd,
 		ManifestServerURL: "https://example.com/abc/prod/manifest.json",
+		ArtifactSHA256:    strings.Repeat("b", 64),
 		Runtime: RuntimeSpec{
 			JavaVersion: "21.0.2+13",
 			Path:        "jre/21.0.2+13",
@@ -209,6 +210,15 @@ func TestDownloadURLConvention(t *testing.T) {
 	want := "https://example.com/abc/prod/jre/21.0.2+13-win-x64.zip"
 	if got != want {
 		t.Fatalf("DownloadURL() = %q, want %q", got, want)
+	}
+}
+
+func TestArtifactDownloadURLConvention(t *testing.T) {
+	m := validManifest()
+	got := m.ArtifactDownloadURL()
+	want := "https://example.com/abc/prod/artifacts/1.5.0.zip"
+	if got != want {
+		t.Fatalf("ArtifactDownloadURL() = %q, want %q", got, want)
 	}
 }
 

@@ -53,6 +53,19 @@ func TestJREAndVersionDirs(t *testing.T) {
 	}
 }
 
+func TestIsVersionDir(t *testing.T) {
+	for _, reserved := range []string{"jre", "rigger.exe", "unins.exe", "maintain.exe", "manifest.json", "app.ico", "install-record.json"} {
+		if IsVersionDir(reserved) {
+			t.Errorf("IsVersionDir(%q) = true, want false", reserved)
+		}
+	}
+	for _, version := range []string{"1.5.0", "2.0.0-beta", "1.0.0"} {
+		if !IsVersionDir(version) {
+			t.Errorf("IsVersionDir(%q) = false, want true", version)
+		}
+	}
+}
+
 func TestStartMenuDirMatchesScope(t *testing.T) {
 	os.Setenv("ProgramData", `C:\ProgramData`)
 	os.Setenv("AppData", `C:\Users\me\AppData\Roaming`)

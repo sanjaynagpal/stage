@@ -3,7 +3,9 @@
 // (docs/REQUIREMENTS.md §3, §12-14). It is shared by the installer (initial
 // bundled JRE — extracted from a local archive, not downloaded) and by
 // maintain.exe (on-demand fetch of a JRE the manifest wants but that isn't
-// present on disk yet).
+// present on disk yet). Its download-and-verify and eviction primitives are
+// also reused by internal/jarprovision, the app-level analogue that fetches
+// jars instead of a JRE.
 package jreprovision
 
 import (
@@ -30,7 +32,8 @@ const MaxRetainedVersions = 2
 // under root/jre beyond MaxRetainedVersions (keeping the most recently
 // provisioned ones). jreDir must be a "jre/<version>" directory under root.
 func Provision(root, url, expectedSHA256Hex, jreDir string) error {
-	archivePath, err := download(url, expectedSHA256Hex)
+	client := &http.Client{Timeout: 5 * time.Minute}
+	archivePath, err := DownloadVerified(client, url, expectedSHA256Hex)
 	if err != nil {
 		return err
 	}
@@ -79,14 +82,19 @@ func verifyChecksum(path, expectedSHA256Hex string) error {
 	return nil
 }
 
-func download(url, expectedSHA256Hex string) (string, error) {
-	tmp, err := os.CreateTemp("", "stage-jre-*.zip")
+// DownloadVerified downloads the archive at url via client, verifies it
+// against expectedSHA256Hex, and returns the path to a temp file holding it
+// (the caller must os.Remove it). Shared by JRE and app-jar provisioning —
+// both need "fetch a zip and trust it only after checksum verification,"
+// routed through whichever *http.Client the caller already has (e.g.
+// cmd/rigger's proxy-aware client, docs/REQUIREMENTS.md §17-18).
+func DownloadVerified(client *http.Client, url, expectedSHA256Hex string) (string, error) {
+	tmp, err := os.CreateTemp("", "stage-download-*.zip")
 	if err != nil {
 		return "", fmt.Errorf("jreprovision: create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
 
-	client := http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(url)
 	if err != nil {
 		tmp.Close()
@@ -123,37 +131,47 @@ func download(url, expectedSHA256Hex string) (string, error) {
 // evictOldVersions removes JRE version directories under root/jre beyond
 // MaxRetainedVersions, oldest first, using each directory's own
 // modification time (set when it was created/last written to) as the
-// recency signal.
+// recency signal. jre/ holds only version directories, so every entry is
+// eligible.
 func evictOldVersions(root string) error {
-	jreRoot := filepath.Join(root, "jre")
-	entries, err := os.ReadDir(jreRoot)
+	return EvictOldest(filepath.Join(root, "jre"), MaxRetainedVersions, func(string) bool { return true })
+}
+
+// EvictOldest removes directories directly under dirRoot beyond keep, oldest
+// first by modification time, restricted to entries for which include
+// returns true — the shared core behind jre/ eviction here (where every
+// entry qualifies) and internal/jarprovision's eviction (where include is
+// layout.IsVersionDir, since the install root also holds Rigger's own fixed
+// files alongside app-version directories).
+func EvictOldest(dirRoot string, keep int, include func(name string) bool) error {
+	entries, err := os.ReadDir(dirRoot)
 	if err != nil {
-		return fmt.Errorf("jreprovision: list %s: %w", jreRoot, err)
+		return fmt.Errorf("jreprovision: list %s: %w", dirRoot, err)
 	}
 
-	type versionDir struct {
+	type dirInfo struct {
 		path    string
 		modTime time.Time
 	}
-	var dirs []versionDir
+	var dirs []dirInfo
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || !include(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		dirs = append(dirs, versionDir{path: filepath.Join(jreRoot, e.Name()), modTime: info.ModTime()})
+		dirs = append(dirs, dirInfo{path: filepath.Join(dirRoot, e.Name()), modTime: info.ModTime()})
 	}
-	if len(dirs) <= MaxRetainedVersions {
+	if len(dirs) <= keep {
 		return nil
 	}
 
 	sort.Slice(dirs, func(i, j int) bool { return dirs[i].modTime.After(dirs[j].modTime) })
-	for _, d := range dirs[MaxRetainedVersions:] {
+	for _, d := range dirs[keep:] {
 		if err := os.RemoveAll(d.path); err != nil {
-			return fmt.Errorf("jreprovision: evict old JRE %s: %w", d.path, err)
+			return fmt.Errorf("jreprovision: evict %s: %w", d.path, err)
 		}
 	}
 	return nil
