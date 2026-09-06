@@ -17,6 +17,7 @@ import (
 	"github.com/sanjaynagpal/stage/internal/applog"
 	"github.com/sanjaynagpal/stage/internal/jarprovision"
 	"github.com/sanjaynagpal/stage/internal/javainvoke"
+	"github.com/sanjaynagpal/stage/internal/jreprovision"
 	"github.com/sanjaynagpal/stage/internal/layout"
 	"github.com/sanjaynagpal/stage/internal/manifest"
 	"github.com/sanjaynagpal/stage/internal/proxydetect"
@@ -76,21 +77,31 @@ func run() (err error) {
 		logger.Warn("rigger: warning: auth response Network Zone %q does not match this install's configured zone %q", returnedZone, appValues.NetworkZone)
 	}
 
-	client := proxydetect.Client(proxydetect.Result{Host: appValues.ProxyHost, Port: appValues.ProxyPort}, 10*time.Second)
+	// A short-timeout client for the manifest poll (every launch — a slow
+	// manifest server shouldn't stall an ordinary launch for long) and a
+	// separate long-timeout client for the two on-demand archive fetches
+	// below, which are rare but can legitimately take minutes.
+	manifestClient := proxydetect.Client(proxydetect.Result{Host: appValues.ProxyHost, Port: appValues.ProxyPort}, 10*time.Second)
+	fetchClient := proxydetect.Client(proxydetect.Result{Host: appValues.ProxyHost, Port: appValues.ProxyPort}, 5*time.Minute)
 
-	m, err := loadManifest(root, appValues.ManifestServerURL, client, logger)
+	m, err := loadManifest(root, appValues.ManifestServerURL, manifestClient, logger)
 	if err != nil {
 		return fmt.Errorf("rigger: could not load application manifest: %w", err)
 	}
 
 	jreDir := filepath.Join(root, m.Runtime.Path)
 	if _, err := os.Stat(jreDir); err != nil {
-		// TODO(Phase 8): when appValues.PackageMode == winreg.ModeDynamic,
-		// invoke maintain.exe to provision this JRE on demand, then retry
-		// once before failing. Static installs (and a failed provisioning
-		// attempt) always fail clearly rather than launching with a
-		// mismatched/older runtime (docs/REQUIREMENTS.md §12-14).
-		return fmt.Errorf("required Java runtime %s is not installed at %s — reinstall or upgrade %s to fix this", m.Runtime.JavaVersion, jreDir, appID)
+		if appValues.PackageMode != winreg.ModeDynamic {
+			// Static installs (and an all-users install is always forced
+			// Static) never self-update the runtime — fail clearly rather
+			// than launching with a mismatched/older one, per §12-14.
+			return fmt.Errorf("required Java runtime %s is not installed at %s — reinstall or upgrade %s to fix this", m.Runtime.JavaVersion, jreDir, appID)
+		}
+		logger.Info("rigger: required Java runtime %s not found at %s — fetching from %s", m.Runtime.JavaVersion, jreDir, m.DownloadURL())
+		if err := jreprovision.Provision(fetchClient, root, m.DownloadURL(), m.Runtime.SHA256, jreDir); err != nil {
+			return fmt.Errorf("rigger: could not provision required Java runtime %s: %w", m.Runtime.JavaVersion, err)
+		}
+		logger.Info("rigger: provisioned Java runtime %s", m.Runtime.JavaVersion)
 	}
 	logger.Info("rigger: using Java %s at %s", m.Runtime.JavaVersion, jreDir)
 
@@ -98,7 +109,7 @@ func run() (err error) {
 	if _, err := os.Stat(versionDir); err != nil {
 		artifactURL := m.ArtifactDownloadURL()
 		logger.Info("rigger: application version %s not found locally at %s — fetching from %s", m.Version, versionDir, artifactURL)
-		if err := jarprovision.Provision(client, root, artifactURL, m.ArtifactSHA256, versionDir); err != nil {
+		if err := jarprovision.Provision(fetchClient, root, artifactURL, m.ArtifactSHA256, versionDir); err != nil {
 			return fmt.Errorf("rigger: could not fetch application version %s: %w", m.Version, err)
 		}
 		logger.Info("rigger: fetched and installed application version %s", m.Version)

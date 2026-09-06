@@ -1,11 +1,12 @@
 // Package jreprovision downloads, verifies, and unpacks a JRE archive
 // on demand, and enforces the max-2-retained-versions eviction policy
 // (docs/REQUIREMENTS.md §3, §12-14). It is shared by the installer (initial
-// bundled JRE — extracted from a local archive, not downloaded) and by
-// maintain.exe (on-demand fetch of a JRE the manifest wants but that isn't
-// present on disk yet). Its download-and-verify and eviction primitives are
-// also reused by internal/jarprovision, the app-level analogue that fetches
-// jars instead of a JRE.
+// bundled JRE — extracted from a local archive via ProvisionLocal, not
+// downloaded) and by cmd/rigger itself (on-demand fetch, in-process, of a
+// JRE version the manifest wants but that isn't present on disk yet, via
+// Provision). Its download-and-verify and eviction primitives are also
+// reused by internal/jarprovision, the app-level analogue that fetches jars
+// instead of a JRE.
 package jreprovision
 
 import (
@@ -27,12 +28,14 @@ import (
 // <root>/jre at once (docs/REQUIREMENTS.md §3).
 const MaxRetainedVersions = 2
 
-// Provision downloads the archive at url, verifies it against
+// Provision downloads the archive at url via client, verifies it against
 // expectedSHA256Hex, unpacks it to jreDir, and then evicts old JRE versions
 // under root/jre beyond MaxRetainedVersions (keeping the most recently
 // provisioned ones). jreDir must be a "jre/<version>" directory under root.
-func Provision(root, url, expectedSHA256Hex, jreDir string) error {
-	client := &http.Client{Timeout: 5 * time.Minute}
+// client should be a proxy-aware client (e.g. proxydetect.Client) when
+// called from a live Rigger process, mirroring jarprovision.Provision
+// (docs/REQUIREMENTS.md §17-18).
+func Provision(client *http.Client, root, url, expectedSHA256Hex, jreDir string) error {
 	archivePath, err := DownloadVerified(client, url, expectedSHA256Hex)
 	if err != nil {
 		return err

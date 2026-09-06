@@ -54,7 +54,7 @@ func TestJREAndVersionDirs(t *testing.T) {
 }
 
 func TestIsVersionDir(t *testing.T) {
-	for _, reserved := range []string{"jre", "rigger.exe", "unins.exe", "maintain.exe", "manifest.json", "app.ico", "install-record.json"} {
+	for _, reserved := range []string{"jre", "rigger.exe", "unins.exe", "manifest.json", "app.ico", "install-record.json"} {
 		if IsVersionDir(reserved) {
 			t.Errorf("IsVersionDir(%q) = true, want false", reserved)
 		}
