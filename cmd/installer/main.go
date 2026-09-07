@@ -48,7 +48,13 @@ type installerUI interface {
 	Confirm(prompt string, defaultYes bool) bool
 	RetryCancel(prompt string, check func() error) error
 	ReadLine(prompt string) string
+	// Notify posts a discrete, permanent milestone (e.g. "Writing registry
+	// values..."). Use Progress instead for a rapidly repeating report of
+	// the same ongoing operation (a percentage climbing), so repeated
+	// calls update one status line rather than each leaving their own
+	// permanent log entry.
 	Notify(msg string)
+	Progress(msg string)
 }
 
 func main() {
@@ -137,11 +143,11 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 		return fmt.Errorf("installer: create %s: %w", dataDir, err)
 	}
 
-	ui.Notify("Installing...")
-	if err := extractPayload(root, cfg); err != nil {
+	if err := extractPayload(ui, root, cfg); err != nil {
 		return err
 	}
 
+	ui.Notify(fmt.Sprintf("Writing registry values to `%s\\Software\\%s`...", hkeyName(scope), cfg.AppID))
 	if err := writeRegistry(scope, cfg, m, meta, root, dataDir, packageMode, proxyHost, proxyPort, requiredBytes); err != nil {
 		return err
 	}
@@ -149,11 +155,13 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 	riggerPath := layout.RiggerExePath(root)
 	record := payload.InstallRecord{Scope: scope, ProtocolScheme: cfg.ProtocolScheme}
 
+	ui.Notify(fmt.Sprintf("Registering protocol handler in `%s\\Software\\Classes\\%s`...", hkeyName(scope), cfg.ProtocolScheme))
 	if err := protocolhandler.Register(scope, cfg.ProtocolScheme, cfg.AppName, riggerPath); err != nil {
 		return fmt.Errorf("installer: register protocol handler: %w", err)
 	}
 
 	for _, fa := range cfg.FileAssociations {
+		ui.Notify(fmt.Sprintf("Registering file association %s in `%s\\Software\\Classes\\%s`...", fa.Extension, hkeyName(scope), fa.Extension))
 		iconPath := ""
 		if fa.IconPath != "" {
 			iconPath = layout.IconPath(root)
@@ -171,6 +179,7 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 
 	if m.Shortcut.StartMenu {
 		linkPath := filepath.Join(layout.StartMenuDir(scope, cfg.AppName), cfg.AppName+".lnk")
+		ui.Notify("Creating Start Menu shortcut at `" + linkPath + "`...")
 		if err := shortcut.Create(shortcut.Spec{
 			Path: linkPath, TargetPath: riggerPath, Description: m.Shortcut.Description, IconPath: layout.IconPath(root),
 		}); err != nil {
@@ -180,6 +189,7 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 	}
 	if m.Shortcut.Desktop {
 		linkPath := filepath.Join(layout.DesktopDir(scope), cfg.AppName+".lnk")
+		ui.Notify("Creating Desktop shortcut at `" + linkPath + "`...")
 		if err := shortcut.Create(shortcut.Spec{
 			Path: linkPath, TargetPath: riggerPath, Description: m.Shortcut.Description, IconPath: layout.IconPath(root),
 		}); err != nil {
@@ -295,7 +305,7 @@ func resolveProxy(ui installerUI, targetURL string) (host, port string) {
 	if result.Empty() {
 		ui.Notify("Detected proxy: none (direct connection)")
 	} else {
-		ui.Notify(fmt.Sprintf("Detected proxy: %s:%s", result.Host, result.Port))
+		ui.Notify(fmt.Sprintf("Detected proxy: `%s:%s`", result.Host, result.Port))
 	}
 
 	override := ui.ReadLine("Press Enter to accept, enter a host:port to override, or type 'none' for a direct connection: ")
@@ -314,7 +324,8 @@ func resolveProxy(ui installerUI, targetURL string) (host, port string) {
 	}
 }
 
-func extractPayload(root string, cfg *appconfig.AppConfig) error {
+func extractPayload(ui installerUI, root string, cfg *appconfig.AppConfig) error {
+	ui.Notify("Extracting application files to `" + root + "`...")
 	if err := writeEmbeddedFile(payload.RiggerExeName, layout.RiggerExePath(root)); err != nil {
 		return err
 	}
@@ -347,10 +358,32 @@ func extractPayload(root string, cfg *appconfig.AppConfig) error {
 	}
 
 	jreDir := layout.JREVersionDir(root, cfg.InitialJRE.Version)
-	if err := jreprovision.ProvisionLocal(root, tmpPath, cfg.InitialJRE.SHA256, jreDir); err != nil {
+	ui.Notify(fmt.Sprintf("Installing Java runtime %s to `%s`...", cfg.InitialJRE.Version, jreDir))
+	if err := jreprovision.ProvisionLocal(root, tmpPath, cfg.InitialJRE.SHA256, jreDir, jreExtractNotifier(ui, cfg.InitialJRE.Version)); err != nil {
 		return fmt.Errorf("installer: provision JRE: %w", err)
 	}
 	return nil
+}
+
+// jreExtractNotifier builds a jreprovision.ProgressFunc that posts unzip
+// percentage as it goes via Progress (updating one status line) rather than
+// Notify (which would leave every tick as its own permanent log entry) —
+// deduped to one call per whole percentage point, since the underlying
+// archiveutil throttle is time-based and can still fire more than once for
+// the same rounded percent.
+func jreExtractNotifier(ui installerUI, version string) jreprovision.ProgressFunc {
+	lastPct := -1
+	return func(done, total int64) {
+		if total <= 0 {
+			return
+		}
+		pct := int(float64(done) / float64(total) * 100)
+		if pct == lastPct {
+			return
+		}
+		lastPct = pct
+		ui.Progress(fmt.Sprintf("Installing Java runtime %s... %d%%", version, pct))
+	}
 }
 
 func writeEmbeddedFile(name, destPath string) error {
@@ -365,6 +398,19 @@ func writeEmbeddedFile(name, destPath string) error {
 		return fmt.Errorf("installer: write %s: %w", destPath, err)
 	}
 	return nil
+}
+
+// hkeyName names the registry hive a scope writes to, for display in
+// Notify messages only — internal/winreg, internal/protocolhandler, and
+// internal/fileassoc each independently derive the same root key from
+// scope for the actual writes; this doesn't need to (and can't cleanly,
+// without exporting internals three packages already keep private) share
+// that logic, it just needs to describe it to the operator.
+func hkeyName(scope layout.Scope) string {
+	if scope == layout.ScopeAllUsers {
+		return "HKEY_LOCAL_MACHINE"
+	}
+	return "HKEY_CURRENT_USER"
 }
 
 func writeRegistry(scope layout.Scope, cfg *appconfig.AppConfig, m *manifest.Manifest, meta payload.BuildMeta,

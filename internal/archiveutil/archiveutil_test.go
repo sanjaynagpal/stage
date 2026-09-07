@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,7 +43,7 @@ func TestExtractZipFlatArchive(t *testing.T) {
 	})
 	dest := filepath.Join(t.TempDir(), "out")
 
-	if err := ExtractZip(archive, dest); err != nil {
+	if err := ExtractZip(archive, dest, nil); err != nil {
 		t.Fatalf("ExtractZip: %v", err)
 	}
 
@@ -63,7 +64,7 @@ func TestExtractZipDoesNotStripWrapperDirectory(t *testing.T) {
 	})
 	dest := filepath.Join(t.TempDir(), "out")
 
-	if err := ExtractZip(archive, dest); err != nil {
+	if err := ExtractZip(archive, dest, nil); err != nil {
 		t.Fatalf("ExtractZip: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dest, "jdk-21.0.2+13-jre", "bin", "javaw.exe"))
@@ -82,12 +83,38 @@ func TestExtractZipRejectsPathTraversal(t *testing.T) {
 	})
 	dest := filepath.Join(t.TempDir(), "out")
 
-	err := ExtractZip(archive, dest)
+	err := ExtractZip(archive, dest, nil)
 	if err == nil {
 		t.Fatal("expected an error for a path-traversal zip entry")
 	}
 	if _, statErr := os.Stat(filepath.Join(filepath.Dir(dest), "evil.txt")); statErr == nil {
 		t.Fatal("path-traversal entry was written outside the destination directory")
+	}
+}
+
+func TestExtractZipReportsProgress(t *testing.T) {
+	archive := writeTestZip(t, map[string]string{
+		"bin/javaw.exe": strings.Repeat("x", 1000),
+		"lib/foo.txt":   strings.Repeat("y", 500),
+	})
+	dest := filepath.Join(t.TempDir(), "out")
+
+	var calls []int64
+	err := ExtractZip(archive, dest, func(done, total int64) {
+		calls = append(calls, done)
+		if total != 1500 {
+			t.Errorf("progress call reported total = %d, want 1500 (the archive's uncompressed size)", total)
+		}
+	})
+	if err != nil {
+		t.Fatalf("ExtractZip: %v", err)
+	}
+
+	if len(calls) == 0 {
+		t.Fatal("expected at least one progress call")
+	}
+	if got := calls[len(calls)-1]; got != 1500 {
+		t.Fatalf("final progress call reported %d bytes extracted, want 1500 (all files)", got)
 	}
 }
 
@@ -98,7 +125,7 @@ func TestExtractZipFlatMultiDirArchive(t *testing.T) {
 	})
 	dest := filepath.Join(t.TempDir(), "out")
 
-	if err := ExtractZip(archive, dest); err != nil {
+	if err := ExtractZip(archive, dest, nil); err != nil {
 		t.Fatalf("ExtractZip: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "a", "file1.txt")); err != nil {

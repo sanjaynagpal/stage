@@ -25,6 +25,7 @@ import (
 	"github.com/sanjaynagpal/stage/internal/uierror"
 	"github.com/sanjaynagpal/stage/internal/uriparse"
 	"github.com/sanjaynagpal/stage/internal/winreg"
+	"github.com/sanjaynagpal/stage/internal/wizard"
 )
 
 // zoneURIParam is the query-param name the auth server is expected to echo
@@ -64,7 +65,16 @@ func main() {
 
 func run() (err error) {
 	var logger *applog.Logger
+	// progressUI is opened lazily, only if a fetch actually turns out to be
+	// needed below — an ordinary launch (everything already on disk) never
+	// opens a browser window. Both Notify/Progress/Close are nil-receiver
+	// safe, so every other call site below doesn't need its own nil check.
+	var progressUI *wizard.ProgressUI
 	defer func() {
+		if err != nil {
+			progressUI.Notify(fmt.Sprintf("Failed: %v", err))
+		}
+		progressUI.Close()
 		logger.LogFatal(err)
 		logger.Close()
 	}()
@@ -137,21 +147,41 @@ func run() (err error) {
 			return fmt.Errorf("required Java runtime %s is not installed at %s — reinstall or upgrade %s to fix this", m.Runtime.JavaVersion, jreDir, appID)
 		}
 		logger.Info("rigger: required Java runtime %s not found at %s — fetching from %s", m.Runtime.JavaVersion, jreDir, m.DownloadURL())
-		if err := jreprovision.Provision(fetchClient, root, m.DownloadURL(), m.Runtime.SHA256, jreDir); err != nil {
+		if progressUI == nil {
+			progressUI = openProgressUI(m.AppName, logger)
+		}
+		label := "Java runtime " + m.Runtime.JavaVersion
+		progressUI.Notify("Downloading " + label + "...")
+		download, install := progressReporters(logger, progressUI, label)
+		if err := jreprovision.Provision(fetchClient, root, m.DownloadURL(), m.Runtime.SHA256, jreDir, download, install); err != nil {
 			return fmt.Errorf("rigger: could not provision required Java runtime %s: %w", m.Runtime.JavaVersion, err)
 		}
-		logger.Info("rigger: provisioned Java runtime %s", m.Runtime.JavaVersion)
+		logger.Info("rigger: provisioned Java runtime %s at %s", m.Runtime.JavaVersion, jreDir)
+		progressUI.Notify(fmt.Sprintf("Installed %s to `%s`.", label, jreDir))
 	}
 	logger.Info("rigger: using Java %s at %s", m.Runtime.JavaVersion, jreDir)
 
 	versionDir := layout.VersionDir(root, m.Version)
 	if _, err := os.Stat(versionDir); err != nil {
-		artifactURL := m.ArtifactDownloadURL()
-		logger.Info("rigger: application version %s not found locally at %s — fetching from %s", m.Version, versionDir, artifactURL)
-		if err := jarprovision.Provision(fetchClient, root, artifactURL, m.ArtifactSHA256, versionDir); err != nil {
-			return fmt.Errorf("rigger: could not fetch application version %s: %w", m.Version, err)
+		if progressUI == nil {
+			progressUI = openProgressUI(m.AppName, logger)
 		}
-		logger.Info("rigger: fetched and installed application version %s", m.Version)
+		if len(m.Jars) > 0 {
+			if err := fetchJarsIndividually(fetchClient, root, m, versionDir, logger, progressUI); err != nil {
+				return fmt.Errorf("rigger: could not fetch application version %s: %w", m.Version, err)
+			}
+		} else {
+			artifactURL := m.ArtifactDownloadURL()
+			logger.Info("rigger: application version %s not found locally at %s — fetching from %s", m.Version, versionDir, artifactURL)
+			label := "application version " + m.Version
+			progressUI.Notify("Downloading " + label + "...")
+			download, install := progressReporters(logger, progressUI, label)
+			if err := jarprovision.Provision(fetchClient, root, artifactURL, m.ArtifactSHA256, versionDir, download, install); err != nil {
+				return fmt.Errorf("rigger: could not fetch application version %s: %w", m.Version, err)
+			}
+			logger.Info("rigger: fetched and installed application version %s at %s", m.Version, versionDir)
+			progressUI.Notify(fmt.Sprintf("Installed %s to `%s`.", label, versionDir))
+		}
 	}
 
 	classpath, err := javainvoke.ResolveClasspath(root, m.Classpath)
@@ -171,6 +201,7 @@ func run() (err error) {
 	jvmOptions = append(jvmOptions, "-Dstage.appIcon="+layout.IconPath(root))
 
 	logger.Info("rigger: launching %s %s (mainClass=%s)", m.AppName, m.Version, m.MainClass)
+	progressUI.Notify(fmt.Sprintf("Starting %s %s...", m.AppName, m.Version))
 	return javainvoke.Launch(javainvoke.LaunchSpec{
 		JREDir:     jreDir,
 		Classpath:  classpath,
@@ -178,6 +209,89 @@ func run() (err error) {
 		JVMOptions: jvmOptions,
 		Arguments:  arguments,
 	})
+}
+
+// openProgressUI best-effort opens a browser progress page for a JRE/jar
+// fetch that's about to run — rigger.exe has no progress-bar UI of its own
+// otherwise (unlike cmd/installer, it deliberately stays free of
+// bubbletea/lipgloss so the always-loaded binary doesn't carry that
+// weight, docs/REQUIREMENTS.md §24), so without this an operator watching
+// a shortcut launch that needs to fetch 100+ MB on a slow connection has
+// no visible sign anything is happening at all — rigger.log alone isn't
+// something an ordinary user would think to go find. A failure to open
+// (e.g. no browser found) is not fatal — it only means progress is
+// reported to the log, same as before this existed.
+func openProgressUI(appName string, logger *applog.Logger) *wizard.ProgressUI {
+	pu, err := wizard.ShowProgress(appName)
+	if err != nil {
+		logger.Warn("rigger: warning: could not open progress window (%v); continuing with log-only progress", err)
+		return nil
+	}
+	return pu
+}
+
+// formatProgress renders one "<verb> <label> — NN% (X.X/Y.Y MB)" line,
+// shared by the durable log and the optional progress page so both report
+// identically.
+func formatProgress(verb, label string, done, total int64) string {
+	const mb = 1024 * 1024
+	if total > 0 {
+		return fmt.Sprintf("%s %s — %.0f%% (%.1f/%.1f MB)", verb, label, float64(done)/float64(total)*100, float64(done)/mb, float64(total)/mb)
+	}
+	return fmt.Sprintf("%s %s — %.1f MB", verb, label, float64(done)/mb)
+}
+
+// progressReporters builds the download/install ProgressFunc pair for one
+// on-demand fetch: always logs via applog (the durable trace, throttled by
+// jreprovision's/archiveutil's own progressInterval), and also drives the
+// progress page's live status line when one is open — pu may be nil (no
+// fetch has needed one yet this run, or opening one failed), and its
+// methods are nil-receiver safe, so this never needs its own nil check.
+func progressReporters(logger *applog.Logger, pu *wizard.ProgressUI, label string) (download, install jreprovision.ProgressFunc) {
+	report := func(verb string) jreprovision.ProgressFunc {
+		return func(done, total int64) {
+			line := formatProgress(verb, label, done, total)
+			logger.Info("rigger: %s", line)
+			pu.Progress(line)
+		}
+	}
+	return report("downloading"), report("installing")
+}
+
+// fetchJarsIndividually is the per-file alternative to jarprovision.Provision's
+// single zip archive, used when the manifest declares m.Jars — an app's own
+// choice (docs/REQUIREMENTS.md §9, manifest.Manifest.Jars). Unlike the
+// single-archive path, each jar's download is a distinct, named event: it
+// gets its own Notify milestone (rather than one blanket "Downloading
+// application version X..." for the whole fetch) so an operator watching
+// the progress page sees exactly which jar is in flight, matching how a
+// new release might add/replace individual jars rather than repackaging
+// everything into one blob.
+func fetchJarsIndividually(client *http.Client, root string, m *manifest.Manifest, versionDir string, logger *applog.Logger, pu *wizard.ProgressUI) error {
+	jars := make([]jarprovision.JarSpec, len(m.Jars))
+	for i, j := range m.Jars {
+		jars[i] = jarprovision.JarSpec{Path: j.Path, SHA256: j.SHA256}
+	}
+	baseURL := m.JarsBaseURL()
+	logger.Info("rigger: application version %s not found locally at %s — fetching %d jar(s) from %s", m.Version, versionDir, len(jars), baseURL)
+
+	onFile := func(path string, index, total int) {
+		msg := fmt.Sprintf("Downloading %s (%d/%d)...", path, index, total)
+		logger.Info("rigger: %s", msg)
+		pu.Notify(msg)
+	}
+	onProgress := func(path string, done, total int64) {
+		line := formatProgress("downloading", path, done, total)
+		logger.Info("rigger: %s", line)
+		pu.Progress(line)
+	}
+
+	if err := jarprovision.ProvisionJars(client, root, baseURL, jars, versionDir, onFile, onProgress); err != nil {
+		return err
+	}
+	logger.Info("rigger: fetched and installed application version %s at %s", m.Version, versionDir)
+	pu.Notify(fmt.Sprintf("Installed application version %s to `%s`.", m.Version, versionDir))
+	return nil
 }
 
 // loadManifest loads the locally cached manifest, then best-effort refreshes

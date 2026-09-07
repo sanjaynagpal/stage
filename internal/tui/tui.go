@@ -85,9 +85,21 @@ func (u *UI) RetryCancel(prompt string, check func() error) error {
 	}
 }
 
-// Notify posts a one-way status line (e.g. "Installing...").
+// Notify posts a one-way status line (e.g. "Installing..."): it becomes the
+// current status line and is also kept in the permanent activity log below
+// it. Use this for discrete milestones — each call is a distinct event
+// worth a permanent record.
 func (u *UI) Notify(msg string) {
 	u.program.Send(notifyMsg{text: msg})
+}
+
+// Progress updates the current status line in place without adding to the
+// permanent activity log. Use this for a rapid, repeated report of the same
+// ongoing operation (e.g. a download/extract percentage climbing) — unlike
+// Notify, repeated calls don't each leave their own line in the log, since
+// they're updates to one event, not a sequence of distinct ones.
+func (u *UI) Progress(msg string) {
+	u.program.Send(progressMsg{text: msg})
 }
 
 // --- Bubble Tea model ---
@@ -122,15 +134,24 @@ type notifyMsg struct {
 	text string
 }
 
+type progressMsg struct {
+	text string
+}
+
 type model struct {
 	title string
 	mode  uiMode
+	width int // terminal width, from tea.WindowSizeMsg; 0 until the first resize event
 
 	prompt     string
 	defaultYes bool
 	errText    string
 	input      string
 	log        []string
+	// status is the current single-line status: set by both Notify (which
+	// also appends to log) and Progress (which doesn't) — it's what the
+	// idle-mode box body shows, decoupled from the permanent log history.
+	status string
 
 	confirmResp     chan bool
 	readLineResp    chan string
@@ -163,9 +184,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case notifyMsg:
 		m.log = append(m.log, msg.text)
+		m.status = msg.text
+		return m, nil
+	case progressMsg:
+		m.status = msg.text
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	}
 	return m, nil
 }
@@ -213,38 +241,151 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// Colors are adaptive (light/dark terminal background) rather than single
+// ANSI codes, since operators run this over a wide range of terminal themes.
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Padding(0, 1)
-	boxStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("39")).Padding(1, 2)
-	errStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	hintStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	logStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	colorPrimary     = lipgloss.AdaptiveColor{Light: "25", Dark: "39"}
+	colorPrimaryText = lipgloss.AdaptiveColor{Light: "235", Dark: "252"}
+	colorFaintText   = lipgloss.AdaptiveColor{Light: "243", Dark: "245"}
+	colorInverted    = lipgloss.AdaptiveColor{Light: "255", Dark: "235"}
+	colorError       = lipgloss.AdaptiveColor{Light: "160", Dark: "203"}
+	colorPill        = lipgloss.AdaptiveColor{Light: "254", Dark: "236"}
+	// colorValue highlights a filesystem/registry location named inside a
+	// message (see highlightValues) — distinct from colorPrimary, which is
+	// already the chrome/accent color (header background, box border), so a
+	// value reads as "data" rather than as more chrome.
+	colorValue = lipgloss.AdaptiveColor{Light: "30", Dark: "51"}
+
+	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(colorInverted).Background(colorPrimary).Padding(0, 2)
+	boxStyle        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorPrimary).Padding(1, 2)
+	promptStyle     = lipgloss.NewStyle().Foreground(colorPrimaryText)
+	errStyle        = lipgloss.NewStyle().Bold(true).Foreground(colorError)
+	cursorStyle     = lipgloss.NewStyle().Foreground(colorInverted).Background(colorPrimary)
+	hintKeyStyle    = lipgloss.NewStyle().Bold(true).Foreground(colorPrimaryText).Background(colorPill).Padding(0, 1)
+	hintDescStyle   = lipgloss.NewStyle().Foreground(colorFaintText).PaddingRight(2)
+	logCurrentStyle = lipgloss.NewStyle().Foreground(colorPrimaryText)
+	logFaintStyle   = lipgloss.NewStyle().Foreground(colorFaintText)
+	valueStyle      = lipgloss.NewStyle().Foreground(colorValue)
 )
 
+const (
+	maxBoxContentWidth = 72
+	minBoxContentWidth = 24
+	maxLogLines        = 6
+)
+
+// boxContentWidth derives the wizard box's interior width from the terminal
+// width, clamped so the box neither overflows a narrow terminal nor sprawls
+// absurdly wide on a maximized one. Falls back to a sane default before the
+// first tea.WindowSizeMsg arrives.
+func boxContentWidth(termWidth int) int {
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	w := termWidth - 8 // border (2) + horizontal padding (4), plus a small margin
+	return max(min(w, maxBoxContentWidth), minBoxContentWidth)
+}
+
+// renderHints draws a [KEY] description legend: each key as a filled pill,
+// its description in faint text, joined on one line.
+func renderHints(pairs [][2]string) string {
+	parts := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		parts = append(parts, hintKeyStyle.Render(p[0])+hintDescStyle.Render(" "+p[1]))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// highlightValues renders text in base, except substrings wrapped in
+// backticks (the convention cmd/installer's Notify/Progress messages use to
+// mark a filesystem path or registry key), which render in valueStyle
+// instead — so "Writing registry values to `HKCU\Software\ABC`..." shows
+// the location in a distinct color from the surrounding sentence. Segments
+// are rendered independently and concatenated (not nested Renders), so
+// there's no risk of an inner style's reset code prematurely ending the
+// outer one. A message with no backticks (or an odd, unclosed one) renders
+// unchanged in base.
+func highlightValues(text string, base lipgloss.Style) string {
+	parts := strings.Split(text, "`")
+	if len(parts) == 1 {
+		return base.Render(text)
+	}
+	var out strings.Builder
+	for i, p := range parts {
+		if p == "" {
+			continue
+		}
+		if i%2 == 1 {
+			out.WriteString(valueStyle.Render(p))
+		} else {
+			out.WriteString(base.Render(p))
+		}
+	}
+	return out.String()
+}
+
 func (m model) View() string {
+	contentWidth := boxContentWidth(m.width)
+	// +2 so the header bar's rendered width matches the box's outer width
+	// (boxStyle's rounded border adds 1 column on each side beyond Width).
+	header := headerStyle.Width(contentWidth + 2).Render(m.title)
+
 	var body string
+	var hints [][2]string
 	switch m.mode {
 	case modeConfirm:
-		hint := "[y/N]"
+		body = promptStyle.Render(m.prompt)
+		def := "no"
 		if m.defaultYes {
-			hint = "[Y/n]"
+			def = "yes"
 		}
-		body = fmt.Sprintf("%s %s", m.prompt, hintStyle.Render(hint))
+		hints = [][2]string{{"Y", "yes"}, {"N", "no"}, {"Enter", "default: " + def}}
 	case modeReadLine:
-		body = fmt.Sprintf("%s\n> %s█", m.prompt, m.input)
+		body = promptStyle.Render(m.prompt) + "\n\n> " + m.input + cursorStyle.Render(" ")
+		hints = [][2]string{{"Enter", "submit"}, {"Backspace", "delete"}}
 	case modeRetryCancel:
-		body = fmt.Sprintf("%s\n%s\n\n%s", m.prompt, errStyle.Render(m.errText), hintStyle.Render("[R]etry / [C]ancel"))
+		body = promptStyle.Render(m.prompt) + "\n" + errStyle.Render("✗ "+m.errText)
+		hints = [][2]string{{"R", "retry"}, {"C", "cancel"}}
 	default:
-		if len(m.log) > 0 {
-			body = m.log[len(m.log)-1]
+		if m.status != "" {
+			body = highlightValues(m.status, logCurrentStyle)
 		} else {
-			body = "Working..."
+			body = logFaintStyle.Render("Working...")
 		}
+	}
+	hints = append(hints, [2]string{"Ctrl+C", "quit"})
+
+	box := boxStyle.Width(contentWidth).Render(body)
+	view := header + "\n" + box + "\n" + renderHints(hints)
+
+	// The box body already shows the current status while idle — if that
+	// status is also the log's last entry (the common case: no Progress
+	// ticks have landed since the last Notify), the history panel below
+	// omits it to avoid showing the same line twice. Once Progress calls
+	// have moved the status past the last logged milestone, they no longer
+	// match, so the full log (that milestone included) shows normally.
+	logLines := m.log
+	if m.mode == modeIdle && len(logLines) > 0 && logLines[len(logLines)-1] == m.status {
+		logLines = logLines[:len(logLines)-1]
+	}
+	if len(logLines) > 0 {
+		start := 0
+		if n := len(logLines); n > maxLogLines {
+			start = n - maxLogLines
+		}
+		var lines []string
+		if start > 0 {
+			lines = append(lines, logFaintStyle.Render(fmt.Sprintf("… %d earlier line(s)", start)))
+		}
+		for i := start; i < len(logLines); i++ {
+			style := logFaintStyle
+			if i == len(logLines)-1 {
+				style = logCurrentStyle
+			}
+			lines = append(lines, highlightValues(logLines[i], style))
+		}
+		view += "\n\n" + strings.Join(lines, "\n")
 	}
 
-	view := titleStyle.Render(m.title) + "\n" + boxStyle.Render(body)
-	if len(m.log) > 0 {
-		view += "\n\n" + logStyle.Render(strings.Join(m.log, "\n"))
-	}
 	return view + "\n"
 }

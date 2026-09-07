@@ -11,8 +11,10 @@
   .error { color: #b00020; margin-bottom: 12px; }
   button { padding: 8px 20px; margin-right: 8px; margin-top: 12px; cursor: pointer; }
   input[type=text] { width: 100%; padding: 8px; margin-top: 8px; box-sizing: border-box; }
+  .status { font-weight: 600; margin-bottom: 8px; }
   .log { color: #666; font-size: 0.9em; }
   .log div { margin-top: 4px; }
+  .value { color: #0067b8; font-weight: 600; }
 </style>
 </head>
 <body hx-post="/{{.Token}}/heartbeat" hx-trigger="every 2s" hx-swap="none">

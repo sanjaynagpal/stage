@@ -85,6 +85,59 @@ func TestValidateRejectsAbsolutePaths(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsBothArtifactSHA256AndJars(t *testing.T) {
+	m := validManifest()
+	m.Jars = []JarSpec{{Path: "app.jar", SHA256: strings.Repeat("d", 64)}}
+	// m.ArtifactSHA256 is already set by validManifest.
+	err := m.Validate()
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected a mutual-exclusivity error, got: %v", err)
+	}
+}
+
+func TestValidateAcceptsJarsWithoutArtifactSHA256(t *testing.T) {
+	m := validManifest()
+	m.ArtifactSHA256 = ""
+	m.Jars = []JarSpec{
+		{Path: "app.jar", SHA256: strings.Repeat("d", 64)},
+		{Path: "lib/gson-2.10.jar", SHA256: strings.Repeat("e", 64)},
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("expected a well-formed jars-mode manifest to validate, got: %v", err)
+	}
+}
+
+func TestValidateRejectsBadJarSpec(t *testing.T) {
+	m := validManifest()
+	m.ArtifactSHA256 = ""
+	m.Jars = []JarSpec{{Path: "", SHA256: ""}}
+	err := m.Validate()
+	if err == nil {
+		t.Fatal("expected an error for an empty jars[0] entry")
+	}
+	for _, want := range []string{"jars[0].path", "jars[0].sha256"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected validation error to mention %q, got: %v", want, err)
+		}
+	}
+
+	m2 := validManifest()
+	m2.ArtifactSHA256 = ""
+	m2.Jars = []JarSpec{{Path: `C:\lib\gson.jar`, SHA256: strings.Repeat("d", 64)}}
+	if err := m2.Validate(); err == nil {
+		t.Fatal("expected an error for an absolute jars[0].path")
+	}
+}
+
+func TestJarsBaseURLConvention(t *testing.T) {
+	m := validManifest()
+	got := m.JarsBaseURL()
+	want := "https://example.com/abc/prod/artifacts/1.5.0/"
+	if got != want {
+		t.Fatalf("JarsBaseURL() = %q, want %q", got, want)
+	}
+}
+
 func TestValidateRejectsUndeclaredURIPlaceholder(t *testing.T) {
 	m := validManifest()
 	m.ProtocolParams = []string{"param1"} // "token" no longer declared

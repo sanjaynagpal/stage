@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,7 +33,35 @@ var templateFS embed.FS
 //go:embed assets/htmx.min.js
 var htmxJS []byte
 
-var tmpl = template.Must(template.ParseFS(templateFS, "templates/*.html"))
+var tmpl = template.Must(template.New("").Funcs(template.FuncMap{"highlight": highlightValues}).ParseFS(templateFS, "templates/*.html"))
+
+// highlightValues converts a message using cmd/installer's backtick
+// convention (a filesystem path or registry key wrapped in backticks, the
+// same markup internal/tui's identical helper parses) into HTML: plain
+// segments are escaped as text, backtick-delimited ones are wrapped in a
+// ".value"-styled span, so a location renders in a distinct color from the
+// surrounding sentence, matching the terminal UI. A message with no
+// backticks (or an odd, unclosed one) renders as plain escaped text.
+func highlightValues(text string) template.HTML {
+	parts := strings.Split(text, "`")
+	if len(parts) == 1 {
+		return template.HTML(template.HTMLEscapeString(text))
+	}
+	var b strings.Builder
+	for i, p := range parts {
+		if p == "" {
+			continue
+		}
+		if i%2 == 1 {
+			b.WriteString(`<span class="value">`)
+			b.WriteString(template.HTMLEscapeString(p))
+			b.WriteString(`</span>`)
+		} else {
+			b.WriteString(template.HTMLEscapeString(p))
+		}
+	}
+	return template.HTML(b.String())
+}
 
 // heartbeatTimeout is how long the page can go without posting a heartbeat
 // before the wizard assumes the browser window was closed and aborts —
@@ -64,6 +93,7 @@ type screenData struct {
 	DefaultYes bool
 	ErrText    string
 	Log        []string
+	Status     string
 }
 
 type state struct {
@@ -74,6 +104,7 @@ type state struct {
 	defYes  bool
 	errText string
 	log     []string
+	status  string
 	version int
 }
 
@@ -167,16 +198,30 @@ func (u *UI) RetryCancel(prompt string, check func() error) error {
 	}
 }
 
-// Notify posts a one-way status line (e.g. "Installing..."). It
-// deliberately does not bump state.version/Broadcast: the idle screen
-// (screenNone) polls on its own timer, so a Notify between two prompts is
-// picked up on the next poll rather than needing to wake a waiter — waking
-// waitForNextScreen here would let a Notify be mistaken for the next real
-// screen change and re-render the *previous*, already-answered prompt
-// (kind doesn't change, only the log does).
+// Notify posts a one-way status line (e.g. "Installing..."): it becomes the
+// current status and is also kept in the permanent log below it — use this
+// for discrete milestones. It deliberately does not bump
+// state.version/Broadcast: the idle screen (screenNone) polls on its own
+// timer, so a Notify between two prompts is picked up on the next poll
+// rather than needing to wake a waiter — waking waitForNextScreen here
+// would let a Notify be mistaken for the next real screen change and
+// re-render the *previous*, already-answered prompt (kind doesn't change,
+// only the log/status does).
 func (u *UI) Notify(msg string) {
 	u.state.mu.Lock()
 	u.state.log = append(u.state.log, msg)
+	u.state.status = msg
+	u.state.mu.Unlock()
+}
+
+// Progress updates the current status in place without adding to the
+// permanent log — use this for a rapid, repeated report of the same
+// ongoing operation (e.g. a download/extract percentage climbing), so
+// repeated calls don't each leave their own line in the log the way
+// repeated Notify calls would. Same non-waking rationale as Notify.
+func (u *UI) Progress(msg string) {
+	u.state.mu.Lock()
+	u.state.status = msg
 	u.state.mu.Unlock()
 }
 
@@ -217,10 +262,16 @@ func (u *UI) snapshot() screenData {
 	defer u.state.mu.Unlock()
 	logCopy := make([]string, len(u.state.log))
 	copy(logCopy, u.state.log)
+	// The idle screen renders Status as its own line (see content.html);
+	// if it still matches the log's last entry (no Progress call has moved
+	// past it), drop that entry here so it isn't shown twice.
+	if u.state.kind == screenNone && len(logCopy) > 0 && logCopy[len(logCopy)-1] == u.state.status {
+		logCopy = logCopy[:len(logCopy)-1]
+	}
 	return screenData{
 		Title: u.title, Token: u.token, Kind: u.state.kind,
 		Prompt: u.state.prompt, DefaultYes: u.state.defYes,
-		ErrText: u.state.errText, Log: logCopy,
+		ErrText: u.state.errText, Log: logCopy, Status: u.state.status,
 	}
 }
 

@@ -16,6 +16,17 @@
 #
 # Run once, then see the printed instructions to start fakeserver and
 # launch rigger.exe.
+#
+# -JarsMode switches the app-jars delivery convention from one zip archive
+# (the default, manifest.ArtifactSHA256) to individually-downloadable jar
+# files (manifest.Jars, internal/jarprovision.ProvisionJars) — an app's own
+# choice, not a Stage-wide setting. With just one fixture jar (app.jar,
+# no dependencies) this is a single-file demo of the per-file path, not a
+# multi-jar one; the mechanism is identical however many jars are declared.
+param(
+    [switch]$JarsMode
+)
+
 $ErrorActionPreference = "Stop"
 
 $abcDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -53,14 +64,26 @@ try {
 Write-Host "`nBuilding the ABC fixture app..."
 & (Join-Path $abcDir "java/build.ps1")
 
-Write-Host "`nZipping app.jar into an artifacts archive for fakeserver to serve..."
-$artifactsDir = Join-Path $abcDir "fakeserver/served/abc/artifacts"
-New-Item -ItemType Directory -Force -Path $artifactsDir | Out-Null
-$artifactZipPath = Join-Path $artifactsDir "1.0.0.zip"
-if (Test-Path $artifactZipPath) { Remove-Item $artifactZipPath -Force }
-Compress-Archive -Path (Join-Path $abcDir "java/target/app.jar") -DestinationPath $artifactZipPath -CompressionLevel Optimal
-$artifactSha256 = (Get-FileHash -Path $artifactZipPath -Algorithm SHA256).Hash.ToLower()
-Write-Host "Artifact SHA256: $artifactSha256"
+if ($JarsMode) {
+    Write-Host "`nCopying app.jar as a loose file for jars-mode delivery (manifest.Jars, internal/jarprovision.ProvisionJars)..."
+    $jarsDir = Join-Path $abcDir "fakeserver/served/abc/artifacts/1.0.0"
+    New-Item -ItemType Directory -Force -Path $jarsDir | Out-Null
+    $jarPath = Join-Path $jarsDir "app.jar"
+    Copy-Item -Force (Join-Path $abcDir "java/target/app.jar") $jarPath
+    $jarSha256 = (Get-FileHash -Path $jarPath -Algorithm SHA256).Hash.ToLower()
+    Write-Host "app.jar SHA256: $jarSha256"
+    $jarDelivery = "`"jars`": [ { `"path`": `"app.jar`", `"sha256`": `"$jarSha256`" } ]"
+} else {
+    Write-Host "`nZipping app.jar into an artifacts archive for fakeserver to serve..."
+    $artifactsDir = Join-Path $abcDir "fakeserver/served/abc/artifacts"
+    New-Item -ItemType Directory -Force -Path $artifactsDir | Out-Null
+    $artifactZipPath = Join-Path $artifactsDir "1.0.0.zip"
+    if (Test-Path $artifactZipPath) { Remove-Item $artifactZipPath -Force }
+    Compress-Archive -Path (Join-Path $abcDir "java/target/app.jar") -DestinationPath $artifactZipPath -CompressionLevel Optimal
+    $artifactSha256 = (Get-FileHash -Path $artifactZipPath -Algorithm SHA256).Hash.ToLower()
+    Write-Host "Artifact SHA256: $artifactSha256"
+    $jarDelivery = "`"artifactSha256`": `"$artifactSha256`""
+}
 
 # Deliberately not pre-populating $installRoot\1.0.0 with app.jar here: the
 # absence is what makes the first launch exercise Rigger's on-demand jar
@@ -93,7 +116,7 @@ Write-Host "JRE SHA256: $jreSha256"
 
 Write-Host "`nWriting manifest.json (local cache + fakeserver-served copy)..."
 $template = Get-Content (Join-Path $abcDir "fakeserver/public/abc/manifest.json") -Raw
-$substituted = $template.Replace("__JAVA_VERSION__", $javaVersion).Replace("__ARTIFACT_SHA256__", $artifactSha256).Replace("__JRE_SHA256__", $jreSha256)
+$substituted = $template.Replace("__JAVA_VERSION__", $javaVersion).Replace("__JAR_DELIVERY__", $jarDelivery).Replace("__JRE_SHA256__", $jreSha256)
 Set-Content -Path (Join-Path $installRoot "manifest.json") -Value $substituted -NoNewline
 
 $servedDir = Join-Path $abcDir "fakeserver/served/abc"
@@ -118,12 +141,13 @@ Set-ItemProperty -Path $key -Name "NetworkZone" -Value $networkZone
 # direct-connection install. Set them here to test the proxy-placeholder
 # path against a real (or fake) proxy.
 
-Write-Host "`nDone. Install root: $installRoot`n"
+Write-Host "`nDone. Install root: $installRoot"
+Write-Host "Jar delivery mode: $(if ($JarsMode) { 'jars (individual files, manifest.Jars)' } else { 'zip archive (manifest.ArtifactSHA256)' })`n"
 Write-Host "Next steps:"
 Write-Host "  1. Start fakeserver (separate shell):"
 Write-Host "       go run ./examples/abc/fakeserver -dir examples/abc/fakeserver/served"
-Write-Host "  2. Launch via shortcut path (first launch fetches and unpacks the app-jars"
-Write-Host "     archive on demand, since $installRoot\1.0.0 doesn't exist yet):"
+Write-Host "  2. Launch via shortcut path (first launch fetches the app-jars on demand, since"
+Write-Host "     $installRoot\1.0.0 doesn't exist yet):"
 Write-Host "       & '$installRoot\rigger.exe'"
 Write-Host "  3. Launch via protocol-handler path (token gets injected as -Dabc.token):"
 Write-Host "       & '$installRoot\rigger.exe' '${protocolScheme}://launch?token=demo123'"

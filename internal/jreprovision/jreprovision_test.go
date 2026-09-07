@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,7 +72,7 @@ func TestProvisionDownloadsVerifiesAndUnpacks(t *testing.T) {
 	root := t.TempDir()
 	jreDir := filepath.Join(root, "jre", "21.0.2+13")
 
-	if err := Provision(http.DefaultClient, root, url, sha, jreDir); err != nil {
+	if err := Provision(http.DefaultClient, root, url, sha, jreDir, nil, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
@@ -92,7 +93,7 @@ func TestProvisionRejectsChecksumMismatch(t *testing.T) {
 	root := t.TempDir()
 	jreDir := filepath.Join(root, "jre", "21.0.2+13")
 
-	err := Provision(http.DefaultClient, root, url, "0000000000000000000000000000000000000000000000000000000000000000", jreDir)
+	err := Provision(http.DefaultClient, root, url, "0000000000000000000000000000000000000000000000000000000000000000", jreDir, nil, nil)
 	if err == nil {
 		t.Fatal("expected checksum mismatch error")
 	}
@@ -123,7 +124,7 @@ func TestProvisionEvictsOldestVersionBeyondMax(t *testing.T) {
 	mkOldVersion("20.0.1+9", 1*time.Hour)
 
 	newDir := filepath.Join(jreRoot, "21.0.2+13")
-	if err := Provision(http.DefaultClient, root, url, sha, newDir); err != nil {
+	if err := Provision(http.DefaultClient, root, url, sha, newDir, nil, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
@@ -146,6 +147,35 @@ func TestProvisionEvictsOldestVersionBeyondMax(t *testing.T) {
 	}
 }
 
+func TestDownloadVerifiedReportsProgress(t *testing.T) {
+	_, url, sha := serveTestZip(t, map[string]string{
+		"bin/javaw.exe": strings.Repeat("x", 1024),
+	})
+
+	var calls []int64
+	path, err := DownloadVerified(http.DefaultClient, url, sha, func(downloaded, total int64) {
+		calls = append(calls, downloaded)
+		if total <= 0 {
+			t.Errorf("progress call reported total = %d, want the server's Content-Length (> 0)", total)
+		}
+	})
+	if err != nil {
+		t.Fatalf("DownloadVerified: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(path) })
+
+	if len(calls) == 0 {
+		t.Fatal("expected at least one progress call")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := calls[len(calls)-1]; got != info.Size() {
+		t.Fatalf("final progress call reported %d bytes downloaded, want %d (the full archive size)", got, info.Size())
+	}
+}
+
 func TestProvisionLocalVerifiesAndUnpacks(t *testing.T) {
 	archivePath, sha := writeTestZip(t, map[string]string{
 		"bin/javaw.exe": "fake-exe",
@@ -154,7 +184,7 @@ func TestProvisionLocalVerifiesAndUnpacks(t *testing.T) {
 	root := t.TempDir()
 	jreDir := filepath.Join(root, "jre", "21.0.2+13")
 
-	if err := ProvisionLocal(root, archivePath, sha, jreDir); err != nil {
+	if err := ProvisionLocal(root, archivePath, sha, jreDir, nil); err != nil {
 		t.Fatalf("ProvisionLocal: %v", err)
 	}
 
@@ -175,7 +205,7 @@ func TestProvisionLocalRejectsChecksumMismatch(t *testing.T) {
 	root := t.TempDir()
 	jreDir := filepath.Join(root, "jre", "21.0.2+13")
 
-	err := ProvisionLocal(root, archivePath, "0000000000000000000000000000000000000000000000000000000000000000", jreDir)
+	err := ProvisionLocal(root, archivePath, "0000000000000000000000000000000000000000000000000000000000000000", jreDir, nil)
 	if err == nil {
 		t.Fatal("expected checksum mismatch error")
 	}
@@ -206,7 +236,7 @@ func TestProvisionLocalEvictsOldestVersionBeyondMax(t *testing.T) {
 	mkOldVersion("20.0.1+9", 1*time.Hour)
 
 	newDir := filepath.Join(jreRoot, "21.0.2+13")
-	if err := ProvisionLocal(root, archivePath, sha, newDir); err != nil {
+	if err := ProvisionLocal(root, archivePath, sha, newDir, nil); err != nil {
 		t.Fatalf("ProvisionLocal: %v", err)
 	}
 

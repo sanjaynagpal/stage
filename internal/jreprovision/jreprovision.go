@@ -34,15 +34,19 @@ const MaxRetainedVersions = 2
 // provisioned ones). jreDir must be a "jre/<version>" directory under root.
 // client should be a proxy-aware client (e.g. proxydetect.Client) when
 // called from a live Rigger process, mirroring jarprovision.Provision
-// (docs/REQUIREMENTS.md §17-18).
-func Provision(client *http.Client, root, url, expectedSHA256Hex, jreDir string) error {
-	archivePath, err := DownloadVerified(client, url, expectedSHA256Hex)
+// (docs/REQUIREMENTS.md §17-18). onDownloadProgress/onExtractProgress, if
+// non-nil, are each called periodically during their respective phase — a
+// JRE archive is large enough (100+ MB compressed, more once extracted)
+// that an operator staring at a launcher with no feedback for a
+// minute-plus reads as hung; either may be nil.
+func Provision(client *http.Client, root, url, expectedSHA256Hex, jreDir string, onDownloadProgress, onExtractProgress ProgressFunc) error {
+	archivePath, err := DownloadVerified(client, url, expectedSHA256Hex, onDownloadProgress)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(archivePath)
 
-	return provisionFromVerifiedFile(archivePath, jreDir, root)
+	return provisionFromVerifiedFile(archivePath, jreDir, root, onExtractProgress)
 }
 
 // ProvisionLocal verifies an archive already on disk (the installer's own
@@ -51,16 +55,18 @@ func Provision(client *http.Client, root, url, expectedSHA256Hex, jreDir string)
 // the installer at both initial-install and upgrade-in-place time — an
 // upgrade-in-place run is just a re-invocation of the installer, so it must
 // run the same MaxRetainedVersions eviction Provision does, not skip it
-// (docs/REQUIREMENTS.md §9b).
-func ProvisionLocal(root, archivePath, expectedSHA256Hex, jreDir string) error {
+// (docs/REQUIREMENTS.md §9b). onExtractProgress, if non-nil, is called
+// periodically during extraction (there's no download phase here — the
+// archive is already local); may be nil.
+func ProvisionLocal(root, archivePath, expectedSHA256Hex, jreDir string, onExtractProgress ProgressFunc) error {
 	if err := verifyChecksum(archivePath, expectedSHA256Hex); err != nil {
 		return err
 	}
-	return provisionFromVerifiedFile(archivePath, jreDir, root)
+	return provisionFromVerifiedFile(archivePath, jreDir, root, onExtractProgress)
 }
 
-func provisionFromVerifiedFile(archivePath, jreDir, root string) error {
-	if err := archiveutil.ExtractZip(archivePath, jreDir); err != nil {
+func provisionFromVerifiedFile(archivePath, jreDir, root string, onExtractProgress ProgressFunc) error {
+	if err := archiveutil.ExtractZip(archivePath, jreDir, onExtractProgress); err != nil {
 		return err
 	}
 	return evictOldVersions(root)
@@ -85,13 +91,54 @@ func verifyChecksum(path, expectedSHA256Hex string) error {
 	return nil
 }
 
+// ProgressFunc reports download progress: downloaded is the byte count
+// written so far, total is resp.ContentLength (-1/0 when the server didn't
+// send one, e.g. chunked transfer-encoding — callers should treat a
+// non-positive total as "unknown" rather than divide by it). This is a
+// type alias (not a new defined type) for archiveutil.ProgressFunc so a
+// single callback can be passed straight through Provision's download
+// phase and ExtractZip's extraction phase without a conversion at the
+// call site — both report "bytes done, out of a total" identically.
+type ProgressFunc = archiveutil.ProgressFunc
+
+// progressInterval throttles ProgressFunc calls so a fast local/test server
+// (or a slow one, over many small TCP reads) doesn't flood the caller —
+// callers of DownloadVerified log each call, and a real download can last
+// minutes, so this trades a little latency in "freshness" for a log that
+// stays readable.
+const progressInterval = 500 * time.Millisecond
+
+// progressWriter is an io.Writer adapter so download progress can be
+// reported via io.Copy's normal write path (io.MultiWriter) rather than a
+// bespoke read loop duplicating io.Copy's buffering/error handling.
+type progressWriter struct {
+	total      int64
+	written    int64
+	lastReport time.Time
+	onProgress ProgressFunc
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	w.written += int64(n)
+	if w.onProgress != nil && (w.lastReport.IsZero() || time.Since(w.lastReport) >= progressInterval) {
+		w.onProgress(w.written, w.total)
+		w.lastReport = time.Now()
+	}
+	return n, nil
+}
+
 // DownloadVerified downloads the archive at url via client, verifies it
 // against expectedSHA256Hex, and returns the path to a temp file holding it
 // (the caller must os.Remove it). Shared by JRE and app-jar provisioning —
 // both need "fetch a zip and trust it only after checksum verification,"
 // routed through whichever *http.Client the caller already has (e.g.
-// cmd/rigger's proxy-aware client, docs/REQUIREMENTS.md §17-18).
-func DownloadVerified(client *http.Client, url, expectedSHA256Hex string) (string, error) {
+// cmd/rigger's proxy-aware client, docs/REQUIREMENTS.md §17-18). onProgress,
+// if non-nil, is called periodically (at most every progressInterval) while
+// the download is in flight, plus once more after it completes so a final
+// 100%-equivalent call is always delivered even for a download shorter than
+// progressInterval.
+func DownloadVerified(client *http.Client, url, expectedSHA256Hex string, onProgress ProgressFunc) (string, error) {
 	tmp, err := os.CreateTemp("", "stage-download-*.zip")
 	if err != nil {
 		return "", fmt.Errorf("jreprovision: create temp file: %w", err)
@@ -112,7 +159,8 @@ func DownloadVerified(client *http.Client, url, expectedSHA256Hex string) (strin
 	}
 
 	h := sha256.New()
-	_, copyErr := io.Copy(io.MultiWriter(tmp, h), resp.Body)
+	pw := &progressWriter{total: resp.ContentLength, onProgress: onProgress}
+	_, copyErr := io.Copy(io.MultiWriter(tmp, h, pw), resp.Body)
 	closeErr := tmp.Close()
 	if copyErr != nil {
 		os.Remove(tmpPath)
@@ -121,6 +169,9 @@ func DownloadVerified(client *http.Client, url, expectedSHA256Hex string) (strin
 	if closeErr != nil {
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("jreprovision: finalize download %s: %w", url, closeErr)
+	}
+	if onProgress != nil {
+		onProgress(pw.written, pw.total)
 	}
 
 	sum := hex.EncodeToString(h.Sum(nil))

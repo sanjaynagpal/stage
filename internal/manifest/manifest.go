@@ -42,12 +42,22 @@ type Manifest struct {
 	// when the version directory named by Version isn't present on disk yet
 	// (internal/jarprovision) — the app-level analogue of Runtime.SHA256.
 	// Required whenever on-demand jar delivery is possible (docs/REQUIREMENTS.md §9).
+	// Mutually exclusive with Jars — an app picks one on-demand jar-delivery
+	// mode, not both (enforced by Validate).
 	ArtifactSHA256 string `json:"artifactSha256,omitempty"`
-	Runtime           RuntimeSpec `json:"runtime"`
-	Classpath         []string    `json:"classpath"`
-	MainClass         string      `json:"mainClass"`
-	JVMOptions        []string    `json:"jvmOptions,omitempty"`
-	Arguments         []string    `json:"arguments,omitempty"`
+	// Jars, when non-empty, is the per-file alternative to ArtifactSHA256:
+	// the app's jars are declared individually and Rigger fetches each one
+	// separately (internal/jarprovision.ProvisionJars) instead of one zip
+	// archive — an app can prefer this to avoid a zip-packaging build step,
+	// or because it wants each jar to show individually in progress
+	// reporting. The single-archive convention (ArtifactSHA256) remains the
+	// simpler default; this is opt-in.
+	Jars       []JarSpec   `json:"jars,omitempty"`
+	Runtime    RuntimeSpec `json:"runtime"`
+	Classpath  []string    `json:"classpath"`
+	MainClass  string      `json:"mainClass"`
+	JVMOptions []string    `json:"jvmOptions,omitempty"`
+	Arguments  []string    `json:"arguments,omitempty"`
 	// ProtocolParams lists the query-param names from a protocol-handler
 	// invocation URI that may be substituted via ${uri.<name>} placeholders
 	// in JVMOptions/Arguments. Any other query param is ignored.
@@ -75,6 +85,19 @@ type RiggerSpec struct {
 	// to proceed — a Version with no SHA256 is treated as misconfigured
 	// and skipped, not trusted (mirrors RuntimeSpec.SHA256's looseness).
 	SHA256 string `json:"sha256,omitempty"`
+}
+
+// JarSpec identifies one individually-downloadable jar file, the per-file
+// alternative to a single zip archive (see Manifest.Jars).
+type JarSpec struct {
+	// Path is the jar's location relative to its version directory (e.g.
+	// "app.jar" or "lib/gson-2.10.jar") — never absolute. Also used, by
+	// convention, as the download path segment: see JarsBaseURL.
+	Path string `json:"path"`
+	// SHA256 verifies the downloaded file. Required — unlike RiggerSpec's
+	// looser "no checksum means skip," a declared jar with no checksum is
+	// simply a malformed manifest, not a legitimate no-op state.
+	SHA256 string `json:"sha256"`
 }
 
 // RuntimeSpec identifies the JRE this manifest requires.
@@ -190,6 +213,20 @@ func (m *Manifest) Validate() error {
 	for _, cp := range m.Classpath {
 		if filepath.IsAbs(cp) {
 			problems = append(problems, fmt.Sprintf("classpath entry %q must be relative to the install root, not absolute", cp))
+		}
+	}
+
+	if len(m.Jars) > 0 && m.ArtifactSHA256 != "" {
+		problems = append(problems, "artifactSha256 and jars are mutually exclusive — declare on-demand jar delivery as either one zip archive (artifactSha256) or a list of individual jars (jars), not both")
+	}
+	for i, j := range m.Jars {
+		if j.Path == "" {
+			problems = append(problems, fmt.Sprintf("jars[%d].path is required", i))
+		} else if filepath.IsAbs(j.Path) {
+			problems = append(problems, fmt.Sprintf("jars[%d].path %q must be relative to the version directory, not absolute", i, j.Path))
+		}
+		if j.SHA256 == "" {
+			problems = append(problems, fmt.Sprintf("jars[%d].sha256 is required", i))
 		}
 	}
 
@@ -334,6 +371,18 @@ func (m *Manifest) DownloadURL() string {
 func (m *Manifest) ArtifactDownloadURL() string {
 	base := m.ManifestServerURL[:strings.LastIndex(m.ManifestServerURL, "/")+1]
 	return base + "artifacts/" + m.Version + ".zip"
+}
+
+// JarsBaseURL derives the on-demand per-jar download directory from
+// ManifestServerURL by the same convention as ArtifactDownloadURL: the
+// manifest's own final path segment replaced with "artifacts/<version>/" —
+// a directory of loose jars alongside where ArtifactDownloadURL would put
+// the single-archive alternative's zip. Each of Manifest.Jars' Path values
+// is appended to this to get that jar's own download URL. Meaningless
+// (but harmless to call) when Jars is empty.
+func (m *Manifest) JarsBaseURL() string {
+	base := m.ManifestServerURL[:strings.LastIndex(m.ManifestServerURL, "/")+1]
+	return base + "artifacts/" + m.Version + "/"
 }
 
 // RiggerDownloadURL derives the on-demand rigger.exe update location from

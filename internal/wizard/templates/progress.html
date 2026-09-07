@@ -1,0 +1,67 @@
+{{define "progress"}}
+{{if .Done}}
+<div data-progress-done hidden></div>
+  {{if .Status}}<div class="status">{{.Status | highlight}}</div>{{end}}
+  <div class="log">{{range .Log}}<div>{{. | highlight}}</div>{{end}}</div>
+  <p>Done — this window will close automatically in a few seconds; you may also close it now.</p>
+{{else}}
+<div hx-get="/{{.Token}}/screen" hx-trigger="every 1s" hx-target="#content" hx-swap="innerHTML">
+  {{if .Status}}<div class="status">{{.Status | highlight}}</div>{{end}}
+  <div class="log">{{range .Log}}<div>{{. | highlight}}</div>{{end}}</div>
+</div>
+{{end}}
+{{end}}
+{{define "progress-page"}}<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Starting {{.Title}}</title>
+<script src="/{{.Token}}/htmx.min.js"></script>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; max-width: 640px; margin: 48px auto; color: #222; }
+  h1 { font-size: 1.4em; }
+  .box { border: 1px solid #ccc; border-radius: 8px; padding: 24px; margin-top: 16px; }
+  .status { font-weight: 600; margin-bottom: 8px; }
+  .log { color: #666; font-size: 0.9em; }
+  .log div { margin-top: 4px; }
+  .value { color: #0067b8; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Starting {{.Title}}</h1>
+<div id="content" class="box">
+{{template "progress" .}}
+</div>
+<script>
+// A protocol-handler launch often already has an auth browser window open
+// before rigger.exe even starts — a second window here that has to be
+// closed by hand is a real annoyance stacked on top of that. This lives in
+// the page's static shell (not inside the htmx-swapped #content div, whose
+// injected <script>/markup can't itself re-run on every swap) and polls the
+// live DOM for the done marker, so it notices as soon as one swap-in shows
+// it. window.close() only works without a browser-shown warning when this
+// window/tab has no navigation history of its own (window.history.length
+// <= 1) — true here either way: a chrome-less "msedge --app=" window that
+// only ever loaded this one page, or a freshly-opened tab in the operator's
+// existing browser. If a browser still blocks it, this is a silent no-op —
+// the visible "you may close this window" text already covers that case.
+//
+// CLOSE_DELAY_MS holds off the actual close once the marker appears —
+// closing on the very next 300ms tick (the first version of this script
+// did) meant the final status/log was visible for a few hundred
+// milliseconds at most, defeating the point of showing it at all.
+(function () {
+  var CLOSE_DELAY_MS = 8000;
+  var scheduled = false;
+  function tryClose() {
+    if (scheduled || !document.querySelector('[data-progress-done]')) return;
+    scheduled = true;
+    setTimeout(function () { window.close(); }, CLOSE_DELAY_MS);
+  }
+  setInterval(tryClose, 300);
+  tryClose();
+})();
+</script>
+</body>
+</html>
+{{end}}
