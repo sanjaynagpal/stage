@@ -186,6 +186,42 @@ value, then launch. Expect a fatal error naming the checksum mismatch, and confi
 directory was not created. Restore the correct checksum afterward (rerun
 `setup-dev-install.ps1`, which recomputes and rewrites it).
 
+### 2.5b Testing jars-mode delivery (individual jars instead of one zip)
+
+`manifest.Manifest.Jars` is the per-file alternative to `ArtifactSHA256`'s single zip archive — an
+app declares its jars individually and Rigger fetches each one separately
+(`internal/jarprovision.ProvisionJars`) instead of one archive. Re-run the setup script with the
+switch to exercise this path instead of the default:
+```powershell
+.\examples\abc\setup-dev-install.ps1 -JarsMode
+```
+This copies `app.jar` as a loose file to `examples/abc/fakeserver/served/abc/artifacts/1.0.0/app.jar`
+(matching `Manifest.JarsBaseURL()`'s `.../artifacts/<version>/<path>` convention) instead of
+zipping it, and writes `"jars": [ { "path": "app.jar", "sha256": "..." } ]` into the manifest
+instead of `artifactSha256`. Everything else — registry values, JRE — is identical to §2.1.
+
+With fakeserver running (§2.2) and `$installRoot\1.0.0` deleted (or freshly set up, which never
+creates it), launch as in §2.3. Expect console output like:
+```
+rigger: application version 1.0.0 not found locally at C:\Users\<you>\AppData\Local\ABC\1.0.0 — fetching 1 jar(s) from http://127.0.0.1:8080/abc/artifacts/1.0.0/
+rigger: Downloading app.jar (1/1)...
+rigger: downloading app.jar — 20% (0.0/0.0 MB)
+rigger: downloading app.jar — 100% (0.0/0.0 MB)
+rigger: fetched and installed application version 1.0.0 at C:\Users\<you>\AppData\Local\ABC\1.0.0
+```
+(Verified against a real run — even the tiny fixture jar crosses the progress throttle at least
+twice; a larger jar shows more intermediate percentages.) With more than one entry in `Jars`,
+expect one `"Downloading <path> (<index>/<total>)..."` line per jar, in declaration order. A
+browser tab also opens ("Opening progress in your browser: ..."), showing the same milestones/
+percentage live — the `internal/wizard.ShowProgress` page any on-demand JRE/jar fetch opens.
+
+**Checksum mismatch**: with `1.0.0` deleted, edit `examples/abc/fakeserver/served/abc/manifest.json`'s
+`jars[0].sha256` to any other 64-hex-char value, then launch. Expect a fatal error naming the
+mismatch for `app.jar` specifically, and confirm `1.0.0` was not created. Restore the correct
+checksum afterward (rerun `setup-dev-install.ps1 -JarsMode`).
+
+Switch back to the default zip mode by rerunning the script without `-JarsMode`.
+
 ### 2.6 Clean up
 
 Kill any leftover processes after testing:

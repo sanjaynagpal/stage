@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "environment": "PROD",
   "manifestServerUrl": "http://127.0.0.1:8080/abc/manifest.json",
-  "artifactSha256": "__ARTIFACT_SHA256__",
+  __JAR_DELIVERY__,
   "runtime": {
     "javaVersion": "__JAVA_VERSION__",
     "path": "jre/__JAVA_VERSION__",

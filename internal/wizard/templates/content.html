@@ -19,11 +19,12 @@
   <button type="submit" name="choice" value="cancel">Cancel</button>
 </form>
 {{else if eq .Kind 4}}
-<div class="log">{{range .Log}}<div>{{.}}</div>{{end}}</div>
+<div class="log">{{range .Log}}<div>{{. | highlight}}</div>{{end}}</div>
 <p>Setup has finished. You may close this window.</p>
 {{else}}
-<div hx-get="/{{.Token}}/screen" hx-trigger="every 1s" hx-target="#content" hx-swap="innerHTML" class="log">
-  {{range .Log}}<div>{{.}}</div>{{end}}
+<div hx-get="/{{.Token}}/screen" hx-trigger="every 1s" hx-target="#content" hx-swap="innerHTML">
+  {{if .Status}}<div class="status">{{.Status | highlight}}</div>{{end}}
+  <div class="log">{{range .Log}}<div>{{. | highlight}}</div>{{end}}</div>
 </div>
 {{end}}
 {{end}}
