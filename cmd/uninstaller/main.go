@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/sanjaynagpal/stage/internal/console"
+	"github.com/sanjaynagpal/stage/internal/elevate"
 	"github.com/sanjaynagpal/stage/internal/fileassoc"
 	"github.com/sanjaynagpal/stage/internal/layout"
 	"github.com/sanjaynagpal/stage/internal/payload"
@@ -33,6 +34,7 @@ import (
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "unins: error:", err)
+		console.ReadLine("\nPress Enter to exit... ")
 		os.Exit(1)
 	}
 }
@@ -58,8 +60,18 @@ func startUninstall() error {
 	appID := layout.AppIDFromExePath(exePath)
 	root := layout.RootDirFromExePath(exePath)
 
-	if !console.Confirm(fmt.Sprintf("Uninstall %s?", appID), false) {
+	if elevateNeeded(appID) {
+		fmt.Println("This app was installed for all users — requesting administrator privileges...")
+		if err := elevate.Relaunch(exePath); err != nil {
+			return fmt.Errorf("unins: this app must be uninstalled as Administrator: %w", err)
+		}
+		return nil
+	}
+
+	prompt := fmt.Sprintf("Uninstall %s? This will remove:\n  %s\n  %s", appID, root, layout.DataDir(appID))
+	if !console.Confirm(prompt, false) {
 		fmt.Println("Uninstall cancelled.")
+		console.ReadLine("\nPress Enter to exit... ")
 		return nil
 	}
 
@@ -73,10 +85,33 @@ func startUninstall() error {
 	}
 
 	cmd := exec.Command(tempCopy, "--finish-uninstall", root, appID)
+	// exec.Cmd redirects an unset Stdin/Stdout/Stderr to the null device —
+	// without these, finishUninstall's prompts/warnings/success message
+	// would silently go nowhere and its RetryCancel would busy-loop on
+	// instant EOF instead of waiting for real input.
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("unins: launch %s: %w", tempCopy, err)
 	}
 	return cmd.Process.Release()
+}
+
+// elevateNeeded reports whether appID's install is AllUsers-scoped (under
+// Program Files/HKLM) and the current process isn't already elevated —
+// removing that install's registry keys and directory will fail partway
+// through otherwise. A registry read failure here is left for the normal
+// flow below to hit and report; this check is best-effort only.
+func elevateNeeded(appID string) bool {
+	if elevate.IsElevated() {
+		return false
+	}
+	appValues, err := winreg.ReadAppValues(appID)
+	if err != nil {
+		return false
+	}
+	return appValues.InstallScope == layout.ScopeAllUsers
 }
 
 func finishUninstall(root, appID string) error {
@@ -97,45 +132,60 @@ func finishUninstall(root, appID string) error {
 		return fmt.Errorf("unins: %w", err)
 	}
 
+	warnings := 0
+	warn := func(format string, args ...any) {
+		warnings++
+		fmt.Fprintf(os.Stderr, "unins: warning: "+format+"\n", args...)
+	}
+
 	appValues, err := winreg.ReadAppValues(appID)
 	if err != nil {
 		return fmt.Errorf("unins: read registry values: %w", err)
 	}
 	record, err := payload.LoadInstallRecord(layout.InstallRecordPath(root))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "unins: warning: could not read install record (%v); some registrations may be left behind\n", err)
+		warn("could not read install record (%v); some registrations may be left behind", err)
 	}
 
 	if record.StartMenuShortcut != "" {
 		if err := shortcut.Remove(record.StartMenuShortcut); err != nil {
-			fmt.Fprintf(os.Stderr, "unins: warning: %v\n", err)
+			warn("%v", err)
 		}
 	}
 	if record.DesktopShortcut != "" {
 		if err := shortcut.Remove(record.DesktopShortcut); err != nil {
-			fmt.Fprintf(os.Stderr, "unins: warning: %v\n", err)
+			warn("%v", err)
 		}
 	}
 	if record.ProtocolScheme != "" {
 		if err := protocolhandler.Unregister(appValues.InstallScope, record.ProtocolScheme); err != nil {
-			fmt.Fprintf(os.Stderr, "unins: warning: %v\n", err)
+			warn("%v", err)
 		}
 	}
 	for _, fa := range record.FileAssociations {
 		if err := fileassoc.Unregister(appValues.InstallScope, fa.Extension, fa.ProgID); err != nil {
-			fmt.Fprintf(os.Stderr, "unins: warning: %v\n", err)
+			warn("%v", err)
 		}
 	}
 
 	if err := winreg.DeleteAppKey(appValues.InstallScope, appID); err != nil {
-		fmt.Fprintf(os.Stderr, "unins: warning: %v\n", err)
+		warn("%v", err)
 	}
 	if err := winreg.DeleteUninstallValues(appValues.InstallScope, appID); err != nil {
-		fmt.Fprintf(os.Stderr, "unins: warning: %v\n", err)
+		warn("%v", err)
 	}
 
 	if err := removeDirWithRetry(root); err != nil {
 		return fmt.Errorf("unins: remove %s: %w", root, err)
+	}
+
+	// DataDir is always the current user's own profile regardless of
+	// InstallScope (layout.DataDir ignores scope) — for an AllUsers install
+	// this only cleans up the user running the uninstall, not every
+	// profile that ever launched the app, matching how per-user app data
+	// is scoped everywhere else in this codebase.
+	if err := os.RemoveAll(layout.DataDir(appID)); err != nil {
+		warn("could not remove data directory: %v", err)
 	}
 
 	// Best-effort: only the temp copy of unins.exe itself needs delayed
@@ -147,7 +197,12 @@ func finishUninstall(root, appID string) error {
 		}
 	}
 
-	fmt.Printf("%s has been uninstalled.\n", appID)
+	if warnings > 0 {
+		fmt.Printf("%s has been uninstalled, with %d warning(s) — see above for details.\n", appID, warnings)
+	} else {
+		fmt.Printf("%s has been uninstalled.\n", appID)
+	}
+	console.ReadLine("\nPress Enter to exit... ")
 	return nil
 }
 
