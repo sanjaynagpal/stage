@@ -7,6 +7,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"github.com/sanjaynagpal/stage/internal/appconfig"
 	"github.com/sanjaynagpal/stage/internal/manifest"
 	"github.com/sanjaynagpal/stage/internal/payload"
+	"github.com/sanjaynagpal/stage/internal/riggerupdate"
 )
 
 func main() {
@@ -106,10 +109,14 @@ func populateAndBuild(repoRoot, payloadDir, configDir string, cfg *appconfig.App
 		return nil
 	}
 
-	if err := goBuild(filepath.Join(payloadDir, payload.RiggerExeName), "./cmd/rigger"); err != nil {
+	riggerExePath := filepath.Join(payloadDir, payload.RiggerExeName)
+	if err := goBuild(riggerExePath, "./cmd/rigger"); err != nil {
 		return err
 	}
 	if err := goBuild(filepath.Join(payloadDir, payload.UninsExeName), "./cmd/uninstaller"); err != nil {
+		return err
+	}
+	if err := publishRiggerUpdateArtifact(repoRoot, riggerExePath); err != nil {
 		return err
 	}
 
@@ -148,6 +155,34 @@ func populateAndBuild(repoRoot, payloadDir, configDir string, cfg *appconfig.App
 		return fmt.Errorf("stagebuild: create %s: %w", distDir, err)
 	}
 	return goBuild(filepath.Join(distDir, cfg.OutputName), "./cmd/installer")
+}
+
+// publishRiggerUpdateArtifact copies the freshly-built rigger.exe to dist/
+// under its own compiled-in version and prints the manifest field values
+// an operator needs to declare to make Dynamic installs self-update to it
+// (docs/REQUIREMENTS.md §25). Stage doesn't upload it anywhere itself —
+// jars/JRE archives already work the same way, the operator's own
+// deployment pipeline owns the manifest server.
+func publishRiggerUpdateArtifact(repoRoot, riggerExePath string) error {
+	distDir := filepath.Join(repoRoot, "dist")
+	if err := os.MkdirAll(distDir, 0o755); err != nil {
+		return fmt.Errorf("stagebuild: create %s: %w", distDir, err)
+	}
+	outPath := filepath.Join(distDir, fmt.Sprintf("rigger-%s-win-x64.exe", riggerupdate.Version))
+	if err := copyFile(riggerExePath, outPath); err != nil {
+		return fmt.Errorf("stagebuild: publish rigger update artifact: %w", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		return fmt.Errorf("stagebuild: read %s: %w", outPath, err)
+	}
+	sum := sha256.Sum256(data)
+	fmt.Printf("stagebuild: built rigger.exe v%s: %s\n", riggerupdate.Version, outPath)
+	fmt.Printf("  To enable self-update for Dynamic installs, upload it to your manifest server at\n")
+	fmt.Printf("  rigger/%s-win-x64.exe (matching Manifest.RiggerDownloadURL()'s convention) and add\n", riggerupdate.Version)
+	fmt.Printf("  to your served manifest: \"rigger\": {\"version\": %q, \"sha256\": %q}\n", riggerupdate.Version, hex.EncodeToString(sum[:]))
+	return nil
 }
 
 // wipePayload removes everything in payloadDir except the committed

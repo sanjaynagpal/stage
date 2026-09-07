@@ -59,6 +59,22 @@ type Manifest struct {
 	// reinstall, like everything else ManifestServerURL polling refreshes.
 	// Empty disables the button entirely — not a required field.
 	SupportEmail string `json:"supportEmail,omitempty"`
+	// Rigger optionally declares a newer rigger.exe build available for
+	// self-update (Dynamic package mode only, docs/REQUIREMENTS.md
+	// §13/§14/§22/§25) — see RiggerSpec.
+	Rigger RiggerSpec `json:"rigger"`
+}
+
+// RiggerSpec optionally declares a newer rigger.exe version available for
+// self-update. Omitted, or Version equal to the running rigger.exe's own
+// compiled-in version (internal/riggerupdate.Version), means no update is
+// available/needed.
+type RiggerSpec struct {
+	Version string `json:"version,omitempty"`
+	// SHA256 verifies the downloaded rigger.exe. Required for self-update
+	// to proceed — a Version with no SHA256 is treated as misconfigured
+	// and skipped, not trusted (mirrors RuntimeSpec.SHA256's looseness).
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // RuntimeSpec identifies the JRE this manifest requires.
@@ -318,4 +334,13 @@ func (m *Manifest) DownloadURL() string {
 func (m *Manifest) ArtifactDownloadURL() string {
 	base := m.ManifestServerURL[:strings.LastIndex(m.ManifestServerURL, "/")+1]
 	return base + "artifacts/" + m.Version + ".zip"
+}
+
+// RiggerDownloadURL derives the on-demand rigger.exe update location from
+// ManifestServerURL by the same convention as DownloadURL/
+// ArtifactDownloadURL: the manifest's own final path segment replaced with
+// "rigger/<version>-win-x64.exe" (docs/REQUIREMENTS.md §25).
+func (m *Manifest) RiggerDownloadURL() string {
+	base := m.ManifestServerURL[:strings.LastIndex(m.ManifestServerURL, "/")+1]
+	return base + "rigger/" + m.Rigger.Version + "-win-x64.exe"
 }

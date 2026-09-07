@@ -283,3 +283,43 @@ server, Proxy, Network zone — plus "Diagnostic logs saved to: ..." naming a ne
 Since the fixture manifest doesn't declare `supportEmail`, expect no "Contact Support" button —
 correct, not a bug. To see it, add `"supportEmail": "support@example.com"` to
 `examples/abc/fakeserver/public/abc/manifest.json` and rerun `setup-dev-install.ps1`.
+
+## 5. Manual end-to-end test: `rigger.exe` binary self-update
+
+Needs a genuinely different `rigger.exe` build to update *to* — building the same source twice
+produces identical bytes, so this can't be tested by just running `setup-dev-install.ps1` twice.
+
+1. Set up normally (§2.1) — `PackageMode=Dynamic` is already the default there. Note the
+   installed `rigger.exe`'s checksum: `Get-FileHash "$env:LocalAppData\ABC\rigger.exe"`.
+2. Temporarily bump `const Version` in `internal/riggerupdate/riggerupdate.go` (e.g. to a version
+   one patch ahead), then:
+   ```powershell
+   go build -o examples\abc\fakeserver\served\abc\rigger\<newversion>-win-x64.exe .\cmd\rigger
+   ```
+   and revert the source change immediately — the built exe is a standalone artifact independent
+   of source state from here on.
+3. Compute its checksum (`Get-FileHash` on the file just built) and add to
+   `examples/abc/fakeserver/served/abc/manifest.json`:
+   ```json
+   "rigger": { "version": "<newversion>", "sha256": "<checksum, lowercase>" }
+   ```
+4. Start fakeserver (§2.2), then launch the (still old) installed `rigger.exe`. Expect:
+   ```
+   rigger: loaded manifest v1.0.0 (fresh fetch from http://127.0.0.1:8080/abc/manifest.json)
+   rigger: new launcher version <newversion> available (running 1.0.0) — updating
+   rigger: handing off to the updated launcher
+   ```
+   and the process exiting immediately (exit code 0, no javaw.exe launched by *this* process).
+5. Confirm: the app still launches (a `javaw.exe` process appears within a couple seconds — the
+   relaunched, updated `rigger.exe` completes the normal flow), and
+   `Get-FileHash "$env:LocalAppData\ABC\rigger.exe"` now matches the new build, not the original.
+6. Launch again — expect **no** self-update line this time (the installed binary now matches the
+   manifest's declared version); this is the check that a successful update doesn't loop.
+7. **Checksum rejection**: bump the manifest's declared version once more with a deliberately
+   wrong `sha256`, launch, and confirm the app still opens normally — either a logged checksum
+   mismatch (if the download got that far) or, if a `%TEMP%` copy from the previous update attempt
+   hasn't been cleaned up yet, a same-named-temp-file warning — both are the same designed
+   fallback (§25): an update attempt must never be why the app doesn't open.
+8. Clean up: remove the `examples/abc/fakeserver/served/abc/rigger/` directory and the
+   `rigger`/`supportEmail` fields from the manifest if you don't want them lingering for later
+   `setup-dev-install.ps1` runs (both are gitignored, so this doesn't touch anything tracked).

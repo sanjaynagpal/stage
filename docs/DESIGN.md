@@ -25,15 +25,15 @@ config and manifest.
 
 | Binary | Status | Role |
 |---|---|---|
-| `rigger.exe` (`cmd/rigger`) | **Implemented** | Generic, prebuilt-once launcher. Zero per-app compiled state — derives its app identity from its own install folder name. Also doubles as the diagnostic entry point via `--doctor` (§2.9e). |
+| `rigger.exe` (`cmd/rigger`) | **Implemented** | Generic, prebuilt-once launcher. Zero per-app compiled state — derives its app identity from its own install folder name. Also doubles as the diagnostic entry point via `--doctor` (§2.9e) and can replace its own installed binary in place via `--finish-self-update` (§2.9f). |
 | `stagebuild` (`cmd/stagebuild`) | **Implemented** | Per-app build tool; consumes an `appconfig.AppConfig` and really compiles `cmd/installer` fresh per (Environment, NetworkZone) pair, with that build's payload embedded via `go:embed`. |
 | the generated installer (`cmd/installer`) | **Implemented** (polished terminal UI by default, `-gui` for a browser wizard — §23) | Runs the full §16 flow — prerequisite checks, extraction, registry writes, protocol-handler/file-association/shortcut registration. |
 | the uninstaller (`cmd/uninstaller`, `unins.exe`) | **Implemented** (minimal console UI) | Self-copy-and-relaunch teardown: removes files, registry keys, protocol handler, file associations, shortcuts. |
 
 Stage ships exactly two binaries per install: `rigger.exe` and `unins.exe`. There is no
 `cmd/maintain` — on-demand JRE provisioning (Dynamic package mode, §13-14) runs in-process inside
-`rigger.exe` itself; see §2.9c for why, and for the (unimplemented) `rigger.exe` self-update
-question.
+`rigger.exe` itself (§2.9c), and `rigger.exe` binary self-update (§2.9f) replaces its own installed
+file via a self-copy-to-`%TEMP%`-and-relaunch trick rather than a companion exe.
 
 ### 2.2 Why Rigger has zero per-app compiled state
 
@@ -286,13 +286,7 @@ In `cmd/rigger`'s `run()`, the former `TODO(Phase 8)` stub at the JRE-directory 
    confirmed failure behavior).
 
 **`rigger.exe` binary self-update** (the other half of §13's original "JRE/rigger self-update"
-companion-exe framing) is still not implemented, and — per §22 — won't need a companion exe either
-when it is: it would reuse the exact self-copy-to-`%TEMP%`-and-relaunch pattern `unins.exe`
-already uses on itself (copy `rigger.exe` to `%TEMP%`, run that copy with a flag, have it
-overwrite the real `rigger.exe` in the install root, then relaunch) — no new binary, no new
-signing surface. It's still unimplemented today for an unrelated reason: there's no
-manifest/appconfig field yet to declare a rigger.exe version + download URL + checksum (analogous
-to `RuntimeSpec`), which is a real schema decision, not something "depends on nothing new."
+companion-exe framing) is now implemented — see §2.9f.
 
 ### 2.9d `cmd/installer`'s two UIs (`internal/tui`, `internal/wizard`)
 
@@ -371,6 +365,47 @@ its query string (`url.Values.Encode()` uses `+` for space; RFC 6068 wants `%20`
 Manually verified end-to-end on a real install, including forcing the worst case (a corrupted
 registry value) and confirming a single clear failed check is rendered rather than a crash.
 
+### 2.9f `rigger.exe` binary self-update (`internal/riggerupdate`)
+
+§13/§14/§22 already decided the mechanism (self-copy-to-`%TEMP%`-and-relaunch, Dynamic-mode-gated,
+no companion exe); §25 resolved what was still missing (versioning, distribution). Every piece
+lives in `internal/riggerupdate`, keeping `cmd/rigger/main.go` a thin dispatcher — the same split
+as doctor mode's `cmd/rigger/doctor.go` over `internal/doctor`/`internal/wizard`.
+
+- **`riggerupdate.Version`** is a hardcoded constant — this build's own version, compared against
+  the manifest's optional `Rigger.Version` (`manifest.RiggerSpec`) via `riggerupdate.NeedsUpdate`.
+- In `cmd/rigger`'s `run()`, right after the manifest loads (before the JRE/jar checks — a
+  pending self-update should hand off before spending time provisioning anything the *new*
+  binary will just redo anyway): if `PackageMode` is `Dynamic` and `NeedsUpdate` is true and a
+  checksum is declared, `riggerupdate.BeginSelfUpdate(appID, os.Args[1:])` copies the running
+  `rigger.exe` to `%TEMP%\stage-rigger-update-<appID>.exe` and re-execs it with
+  `--finish-self-update <appID> [original-args...]` — `os.Args[1:]` (e.g. a protocol-handler URI)
+  is forwarded so the eventual relaunch continues the same invocation, not a bare shortcut launch.
+  `run()` then returns immediately without launching the JVM itself — `main()` dispatches
+  `--finish-self-update` to `riggerupdate.FinishSelfUpdate`, which does that.
+- **`FinishSelfUpdate`** (the `%TEMP%` copy, phase two): re-reads the registry by `appID` (its own
+  exe path is in `%TEMP%`, not the install root, so — like `unins.exe`'s `--finish-uninstall` —
+  it can't derive identity from its own path and is told `appID` explicitly), reloads the
+  manifest, downloads the declared `RiggerDownloadURL()` via `jreprovision.DownloadVerified`
+  (shared with JRE/jar provisioning, not duplicated), verifies the checksum, overwrites the real
+  `rigger.exe`, relaunches it with the forwarded args, and schedules its own temp-copy file for
+  deletion on next reboot (`windows.MoveFileEx(..., MOVEFILE_DELAY_UNTIL_REBOOT)` — identical to
+  `unins.exe`'s own self-cleanup, since a running process can't delete its own exe file either).
+  **Any failure in this phase — download, checksum, write — falls back to relaunching the
+  existing, unmodified `rigger.exe`** rather than failing the launch; an update attempt must
+  never be why the app doesn't open.
+- **`cmd/stagebuild`** copies the freshly-built `rigger.exe` to
+  `dist/rigger-<riggerupdate.Version>-win-x64.exe` and prints the manifest snippet (version +
+  computed checksum) an operator needs to declare — closing a real gap this feature surfaced:
+  `rigger.exe` previously only ever existed embedded inside a specific app's installer, with
+  nothing standalone for an operator to upload for self-update to later fetch.
+
+Manually verified end-to-end on a real install: built a genuinely different (`v1.0.1`) `rigger.exe`
+and confirmed the old (`v1.0.0`) binary self-updates to it (installed file's checksum confirmed to
+match), that the relaunched binary does not re-trigger another update (no loop), and that a real
+failure — a `%TEMP%` file-write collision from two rapid update attempts — falls back to launching
+the prior version rather than failing (§25 records this as a known, accepted narrow race for v1).
+
 ### 2.10 Update model
 
 Two independent channels, regardless of package mode:
@@ -387,10 +422,10 @@ Two independent channels, regardless of package mode:
   — this is the same always-on channel, not a separate one.
 - **`rigger.exe`/JRE binaries**: governed by `PackageMode`. `AllUsers` installs are always
   forced `Static` (Program Files isn't reliably writable by an ordinary later launch);
-  `PerUser` installs default to `Dynamic` and can self-update the JRE on demand, in-process, when
-  a manifest requests a version not on disk (§2.9c) — failing clearly if provisioning doesn't
-  succeed, rather than launching a mismatched runtime. `rigger.exe` binary self-update itself is
-  not yet implemented (§2.9c).
+  `PerUser` installs default to `Dynamic` and can self-update both the JRE (in-process, §2.9c) and
+  `rigger.exe` itself (self-copy-to-`%TEMP%`-and-relaunch, §2.9f) on demand — both fail clearly
+  (JRE) or fall back to the existing binary (rigger.exe) rather than launching a mismatched or
+  broken runtime/launcher.
 
 ## 3. Package Reference (`internal/*`)
 
@@ -419,10 +454,11 @@ Two independent channels, regardless of package mode:
 | `tui` | `cmd/installer`'s default UI: a Bubble Tea/Lipgloss terminal wizard implementing `installerUI` (§2.9d, §23). | This repo's first third-party Go dependency beyond `golang.org/x/sys`, deliberately accepted since the terminal path is now permanent, not a stand-in. Tested by feeding messages into `Update`. |
 | `wizard` | `cmd/installer`'s `-gui` UI (§2.9d, §23) and `rigger.exe --doctor`'s results page (§2.9e, §24) — a local `net/http` server + HTMX opened as a browser "app window." | No COM, no message loop, no native binary dependency — HTMX is checked-in JS source. Tested with `httptest`. |
 | `doctor` | Pure diagnostic logic behind `rigger.exe --doctor` — registry/JRE/manifest-server checks, log collection (§2.9e, §24). No UI; `internal/wizard` renders its `Report`. | Degrades gracefully at every step — even a failed registry read returns a usable (short) report rather than an error. Unit-tested except the registry read itself. |
+| `riggerupdate` | `rigger.exe` binary self-update: version comparison, the self-copy-to-`%TEMP%`-and-relaunch mechanics, download/verify/overwrite (§2.9f, §25). | Any failure falls back to relaunching the existing, unmodified `rigger.exe` — an update attempt must never be why the app doesn't open. Reuses `jreprovision.DownloadVerified` rather than duplicating it. |
 
-`internal/riggerupdate` and `internal/signing` remain empty placeholder packages (reserved for
-planned work per `REQUIREMENTS.md`) — not accidentally empty, not safe to repurpose without
-checking intent first. `internal/uninstallkey` is also still empty and likely
+`internal/signing` remains an empty placeholder package (reserved for planned work per
+`REQUIREMENTS.md`) — not accidentally empty, not safe to repurpose without checking intent first.
+`internal/uninstallkey` is also still empty and likely
 vestigial: its intended purpose (the standard Uninstall registry key) turned out to already be
 fully covered by `internal/winreg.WriteUninstallValues`/`DeleteUninstallValues`, predating this
 package, which `cmd/installer`/`cmd/uninstaller` actually use.
@@ -446,15 +482,20 @@ package, which `cmd/installer`/`cmd/uninstaller` actually use.
    on-demand archive fetches in steps 8-9.
 7. `loadManifest`: load the local cache, then best-effort refresh from `ManifestServerUrl`
    (falling back silently to cache on failure — §2.10).
-8. Confirm the manifest's required JRE directory exists on disk; if not and `PackageMode` is
+8. If `PackageMode` is `Dynamic` and the manifest's `Rigger.Version` names a build other than
+   this one (`riggerupdate.NeedsUpdate`) with a checksum declared, hand off to
+   `riggerupdate.BeginSelfUpdate` and return immediately without launching the JVM — the
+   relaunched, updated `rigger.exe` redoes this whole sequence (§2.9f). A failed hand-off just
+   logs a warning and falls through to continue with the current version.
+9. Confirm the manifest's required JRE directory exists on disk; if not and `PackageMode` is
    `Dynamic`, fetch/verify/extract it in-process via `jreprovision.Provision` (§2.9c), failing
    clearly if `PackageMode` is `Static` or provisioning doesn't succeed.
-9. Confirm the manifest's version directory exists on disk; if not, fetch and unpack it via
+10. Confirm the manifest's version directory exists on disk; if not, fetch and unpack it via
    `jarprovision.Provision` (§2.9b) before continuing — this fetch is unconditional, not gated on
    `PackageMode`.
-10. Resolve the classpath (`javainvoke.ResolveClasspath`, handling `*` globs) and the
+11. Resolve the classpath (`javainvoke.ResolveClasspath`, handling `*` globs) and the
    `${...}` placeholders (`Manifest.Resolve`).
-11. `javainvoke.Launch` — exec `javaw.exe` detached, and exit.
+12. `javainvoke.Launch` — exec `javaw.exe` detached, and exit.
 
 Every step from (3) onward logs its outcome via `applog`; any error returned from `run()` is
 also recorded via `logger.LogFatal` before `main()` reports it through `uierror.Fatalf`.
@@ -469,7 +510,7 @@ also recorded via `logger.LogFatal` before `main()` reports it through `uierror.
 | `cmd/uninstaller` — self-copy-and-relaunch teardown | **Implemented, manually verified end-to-end** (confirmed complete removal) |
 | `internal/*` packages listed in §3 (all but the two remaining placeholders) | **Implemented, unit-tested** |
 | `internal/jreprovision`'s on-demand invocation from a *running* Rigger (Dynamic mode), in-process (§2.9c) | **Implemented, manually verified end-to-end** — `cmd/rigger` calls `jreprovision.Provision` directly when the required JRE is missing and `PackageMode` is `Dynamic`. |
-| `rigger.exe` binary self-update | Not implemented — no manifest/appconfig field exists yet to declare a rigger.exe version/download location (§2.9c) |
+| `rigger.exe` binary self-update (`internal/riggerupdate`, §2.9f, §25) | **Implemented, unit-tested, manually verified end-to-end** — including a confirmed real binary replacement, no update-loop on the relaunched version, and a real failure (temp-file collision) falling back to the prior version. |
 | `internal/tui` / `internal/wizard` (`cmd/installer`'s two UIs, §2.9d) | **Implemented, unit-tested, manually verified end-to-end** — supersedes the originally planned embedded-WebView2 shell (§23) |
 | Doctor mode (`rigger.exe --doctor`, `internal/doctor`, §2.9e, §24) | **Implemented, unit-tested, manually verified end-to-end** — including the worst case (a corrupted registry value) rendering one clear failed check rather than crashing. |
 | Jar delivery via Rigger fetching from `ManifestServerUrl` (§9, `internal/jarprovision`) | **Implemented, unit-tested** — `cmd/rigger` fetches/unpacks a missing version directory before launch, verified by checksum, evicting old versions past `MaxRetainedVersions=2`. |
@@ -500,21 +541,26 @@ also recorded via `logger.LogFatal` before `main()` reports it through `uierror.
 
 ## 7. Known Gaps & Next Steps
 
-The one remaining gap:
+Every major gap this section has tracked is now implemented:
 
-1. **`rigger.exe` binary self-update** (§13) — needs a new manifest/appconfig field to declare a
-   rigger.exe version + download location + checksum (analogous to `RuntimeSpec`), which is a real
-   schema decision, not implemented speculatively alongside the JRE-provisioning work (§2.9c).
-   When it is built, it won't need a companion exe either — see §2.9c's self-copy-relaunch note.
+- **Jar delivery via Rigger** (§9, `internal/jarprovision`, §2.9b) — the full `stagebuild` →
+  install → launch pipeline works end to end with real application code, not just the
+  launcher/runtime/registration plumbing.
+- **On-demand JRE provisioning** (§12-14, §2.9c) — in-process inside `cmd/rigger`, not via a
+  separate `cmd/maintain` binary (§22).
+- **`cmd/installer`'s UI** (§11b, §2.9d) — a polished terminal wizard by default plus a `-gui`
+  browser wizard, replacing the originally planned embedded WebView2 control (§23).
+- **Doctor mode** (§19-20b, §2.9e) — `rigger.exe --doctor`, reusing `internal/wizard` rather than
+  the abandoned WebView2 shell (§24).
+- **`rigger.exe` binary self-update** (§13, §2.9f) — the self-copy-to-`%TEMP%`-and-relaunch
+  pattern, gated on Dynamic package mode, with its own versioning scheme and distribution
+  artifact (§25).
 
-Doctor mode (§19-20b) — previously the top item here — is now implemented (`rigger.exe --doctor`,
-`internal/doctor`, §2.9e, §24), reusing `internal/wizard` rather than the originally planned
-WebView2 shell (§23).
-
-Jar delivery via Rigger (§9) — previously the top item here — is now implemented
-(`internal/jarprovision`, §2.9b); the full `stagebuild` → install → launch pipeline works end to
-end with real application code, not just the launcher/runtime/registration plumbing. On-demand JRE
-provisioning (§12-14) — implemented in-process inside `cmd/rigger` rather than via a separate
-`cmd/maintain` binary (§2.9c, §22). `cmd/installer`'s UI (§11b) — the item before that — is also
-now implemented, as a polished terminal wizard by default plus a `-gui` browser wizard, replacing
-the originally planned embedded WebView2 control (§2.9d, §23).
+What's left is smaller and deliberately out of scope rather than tracked as "next":
+- **`internal/signing`** (Authenticode) — `stagebuild` reads `AppConfig.Signing` but only warns
+  that it's unimplemented; §9's original decision treated certificate acquisition/storage as "a
+  later logistics detail, not an architecture blocker."
+- **`internal/wizard`'s progress model** (§2.9d) — HTMX polling rather than Server-Sent Events;
+  called out there as "adequate for v1," not a defect.
+- **`internal/uninstallkey`** — likely vestigial (§3); `internal/winreg` already covers its
+  intended purpose.

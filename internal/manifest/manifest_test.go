@@ -222,6 +222,16 @@ func TestArtifactDownloadURLConvention(t *testing.T) {
 	}
 }
 
+func TestRiggerDownloadURLConvention(t *testing.T) {
+	m := validManifest()
+	m.Rigger = RiggerSpec{Version: "1.2.0", SHA256: strings.Repeat("c", 64)}
+	got := m.RiggerDownloadURL()
+	want := "https://example.com/abc/prod/rigger/1.2.0-win-x64.exe"
+	if got != want {
+		t.Fatalf("RiggerDownloadURL() = %q, want %q", got, want)
+	}
+}
+
 func equalSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

@@ -21,6 +21,7 @@ import (
 	"github.com/sanjaynagpal/stage/internal/layout"
 	"github.com/sanjaynagpal/stage/internal/manifest"
 	"github.com/sanjaynagpal/stage/internal/proxydetect"
+	"github.com/sanjaynagpal/stage/internal/riggerupdate"
 	"github.com/sanjaynagpal/stage/internal/uierror"
 	"github.com/sanjaynagpal/stage/internal/uriparse"
 	"github.com/sanjaynagpal/stage/internal/winreg"
@@ -38,6 +39,21 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--doctor" {
 		if err := runDoctor(); err != nil {
 			uierror.Fatalf("Diagnostics Failed", "%v", err)
+		}
+		return
+	}
+	// --finish-self-update <appID> [original-args...] is phase two of a
+	// self-update, run from the %TEMP% copy internal/riggerupdate.
+	// BeginSelfUpdate launches (docs/REQUIREMENTS.md §25) — not the
+	// installed rigger.exe itself, which can't overwrite its own running
+	// executable file.
+	if len(os.Args) > 1 && os.Args[1] == "--finish-self-update" {
+		if len(os.Args) < 3 {
+			uierror.Fatalf("Update Failed", "rigger: --finish-self-update requires <appID>")
+			return
+		}
+		if err := riggerupdate.FinishSelfUpdate(os.Args[2], os.Args[3:]); err != nil {
+			uierror.Fatalf("Update Failed", "%v", err)
 		}
 		return
 	}
@@ -96,6 +112,20 @@ func run() (err error) {
 	m, err := loadManifest(root, appValues.ManifestServerURL, manifestClient, logger)
 	if err != nil {
 		return fmt.Errorf("rigger: could not load application manifest: %w", err)
+	}
+
+	if appValues.PackageMode == winreg.ModeDynamic && riggerupdate.NeedsUpdate(m.Rigger.Version) {
+		if m.Rigger.SHA256 == "" {
+			logger.Warn("rigger: warning: manifest declares rigger version %s but no checksum — skipping self-update", m.Rigger.Version)
+		} else {
+			logger.Info("rigger: new launcher version %s available (running %s) — updating", m.Rigger.Version, riggerupdate.Version)
+			if err := riggerupdate.BeginSelfUpdate(appID, os.Args[1:]); err != nil {
+				logger.Warn("rigger: warning: could not start self-update (%v); continuing with the current version", err)
+			} else {
+				logger.Info("rigger: handing off to the updated launcher")
+				return nil
+			}
+		}
 	}
 
 	jreDir := filepath.Join(root, m.Runtime.Path)
