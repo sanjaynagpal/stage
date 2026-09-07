@@ -183,8 +183,12 @@ func finishUninstall(root, appID string) error {
 	// InstallScope (layout.DataDir ignores scope) — for an AllUsers install
 	// this only cleans up the user running the uninstall, not every
 	// profile that ever launched the app, matching how per-user app data
-	// is scoped everywhere else in this codebase.
-	if err := os.RemoveAll(layout.DataDir(appID)); err != nil {
+	// is scoped everywhere else in this codebase. Uses the same retry as
+	// root: observed empty-handed on a real elevated run, most likely a
+	// transient hold from something else (AV/indexing) rather than a real
+	// permission issue — a plain non-admin RemoveAll on the same path
+	// right afterward succeeded immediately.
+	if err := removeDirWithRetry(layout.DataDir(appID)); err != nil {
 		warn("could not remove data directory: %v", err)
 	}
 
@@ -206,13 +210,13 @@ func finishUninstall(root, appID string) error {
 	return nil
 }
 
-// removeDirWithRetry retries os.RemoveAll briefly: the process that
-// launched this one (phase one, above, or an app process that just exited)
-// may still transiently hold a file under root open for a moment.
-func removeDirWithRetry(root string) error {
+// removeDirWithRetry retries os.RemoveAll briefly against path: the process
+// that launched this one (phase one, above, or an app process that just
+// exited) may still transiently hold a file under it open for a moment.
+func removeDirWithRetry(path string) error {
 	var lastErr error
 	for range 10 {
-		if err := os.RemoveAll(root); err == nil {
+		if err := os.RemoveAll(path); err == nil {
 			return nil
 		} else {
 			lastErr = err
