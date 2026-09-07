@@ -29,15 +29,18 @@ const MaxRetainedVersions = 2
 // provisioned ones). versionDir must be a "<root>/<version>" directory.
 // client should be a proxy-aware client (e.g. proxydetect.Client) since,
 // unlike jreprovision's installer-side callers, this runs from a live
-// Rigger launch (docs/REQUIREMENTS.md §17-18).
-func Provision(client *http.Client, root, url, expectedSHA256Hex, versionDir string) error {
-	archivePath, err := jreprovision.DownloadVerified(client, url, expectedSHA256Hex)
+// Rigger launch (docs/REQUIREMENTS.md §17-18). onDownloadProgress/
+// onExtractProgress, if non-nil, are reported through to
+// jreprovision.DownloadVerified/archiveutil.ExtractZip unchanged — see
+// their doc comments; either may be nil.
+func Provision(client *http.Client, root, url, expectedSHA256Hex, versionDir string, onDownloadProgress, onExtractProgress jreprovision.ProgressFunc) error {
+	archivePath, err := jreprovision.DownloadVerified(client, url, expectedSHA256Hex, onDownloadProgress)
 	if err != nil {
 		return fmt.Errorf("jarprovision: %w", err)
 	}
 	defer os.Remove(archivePath)
 
-	if err := archiveutil.ExtractZip(archivePath, versionDir); err != nil {
+	if err := archiveutil.ExtractZip(archivePath, versionDir, onExtractProgress); err != nil {
 		return fmt.Errorf("jarprovision: %w", err)
 	}
 	return jreprovision.EvictOldest(root, MaxRetainedVersions, layout.IsVersionDir)

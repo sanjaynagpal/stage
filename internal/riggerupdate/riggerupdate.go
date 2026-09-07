@@ -103,7 +103,9 @@ func applyUpdate(appValues winreg.AppValues, riggerPath string) error {
 	}
 
 	client := proxydetect.Client(proxydetect.Result{Host: appValues.ProxyHost, Port: appValues.ProxyPort}, 5*time.Minute)
-	tmpPath, err := jreprovision.DownloadVerified(client, m.RiggerDownloadURL(), m.Rigger.SHA256)
+	// No progress reporting here: rigger.exe itself is a few MB, not the
+	// minutes-long download a JRE/jar archive can be.
+	tmpPath, err := jreprovision.DownloadVerified(client, m.RiggerDownloadURL(), m.Rigger.SHA256, nil)
 	if err != nil {
 		return fmt.Errorf("download update: %w", err)
 	}

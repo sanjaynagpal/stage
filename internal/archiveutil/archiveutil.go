@@ -17,11 +17,49 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
+// ProgressFunc reports bytes processed so far against a known total — used
+// both for a download in flight (internal/jreprovision.DownloadVerified) and
+// for extraction here, so the two phases of provisioning a JRE/jar archive
+// report progress the same way. total is non-positive when it isn't known
+// (a download with no Content-Length; never the case for extraction, since
+// a zip's uncompressed sizes are always in its central directory).
+type ProgressFunc func(done, total int64)
+
+// progressInterval throttles ProgressFunc calls so extracting many small
+// files (a JRE archive easily has thousands) doesn't flood the caller —
+// callers of ExtractZip typically log or otherwise render each call.
+const progressInterval = 500 * time.Millisecond
+
+// extractProgress accumulates bytes written across every file in the
+// archive (not just the current one), so onProgress reports overall
+// extraction progress rather than restarting at zero per file.
+type extractProgress struct {
+	total      int64
+	written    int64
+	lastReport time.Time
+	onProgress ProgressFunc
+}
+
+func (p *extractProgress) Write(b []byte) (int, error) {
+	n := len(b)
+	p.written += int64(n)
+	if p.onProgress != nil && (p.lastReport.IsZero() || time.Since(p.lastReport) >= progressInterval) {
+		p.onProgress(p.written, p.total)
+		p.lastReport = time.Now()
+	}
+	return n, nil
+}
+
 // ExtractZip extracts the zip archive at archivePath into destDir, which is
-// created if it doesn't already exist.
-func ExtractZip(archivePath, destDir string) error {
+// created if it doesn't already exist. onProgress, if non-nil, is called
+// periodically (at most every progressInterval) as bytes are written,
+// keyed to the archive's total uncompressed size, plus once more after
+// extraction completes so a final 100%-equivalent call is always
+// delivered; may be nil.
+func ExtractZip(archivePath, destDir string, onProgress ProgressFunc) error {
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return fmt.Errorf("archiveutil: open %s: %w", archivePath, err)
@@ -32,6 +70,14 @@ func ExtractZip(archivePath, destDir string) error {
 		return fmt.Errorf("archiveutil: create %s: %w", destDir, err)
 	}
 	destClean := filepath.Clean(destDir)
+
+	var total int64
+	for _, f := range r.File {
+		if !f.FileInfo().IsDir() {
+			total += int64(f.UncompressedSize64)
+		}
+	}
+	progress := &extractProgress{total: total, onProgress: onProgress}
 
 	for _, f := range r.File {
 		target := filepath.Join(destClean, filepath.FromSlash(f.Name))
@@ -45,14 +91,17 @@ func ExtractZip(archivePath, destDir string) error {
 			}
 			continue
 		}
-		if err := extractFile(f, target); err != nil {
+		if err := extractFile(f, target, progress); err != nil {
 			return err
 		}
+	}
+	if onProgress != nil {
+		onProgress(progress.written, total)
 	}
 	return nil
 }
 
-func extractFile(f *zip.File, target string) error {
+func extractFile(f *zip.File, target string, progress *extractProgress) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("archiveutil: create %s: %w", filepath.Dir(target), err)
 	}
@@ -73,7 +122,7 @@ func extractFile(f *zip.File, target string) error {
 	}
 	defer out.Close()
 
-	if _, err := io.Copy(out, rc); err != nil {
+	if _, err := io.Copy(io.MultiWriter(out, progress), rc); err != nil {
 		return fmt.Errorf("archiveutil: write %s: %w", target, err)
 	}
 	return nil

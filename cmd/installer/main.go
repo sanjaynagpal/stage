@@ -137,11 +137,11 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 		return fmt.Errorf("installer: create %s: %w", dataDir, err)
 	}
 
-	ui.Notify("Installing...")
-	if err := extractPayload(root, cfg); err != nil {
+	if err := extractPayload(ui, root, cfg); err != nil {
 		return err
 	}
 
+	ui.Notify("Writing registry values...")
 	if err := writeRegistry(scope, cfg, m, meta, root, dataDir, packageMode, proxyHost, proxyPort, requiredBytes); err != nil {
 		return err
 	}
@@ -149,10 +149,14 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 	riggerPath := layout.RiggerExePath(root)
 	record := payload.InstallRecord{Scope: scope, ProtocolScheme: cfg.ProtocolScheme}
 
+	ui.Notify("Registering protocol handler...")
 	if err := protocolhandler.Register(scope, cfg.ProtocolScheme, cfg.AppName, riggerPath); err != nil {
 		return fmt.Errorf("installer: register protocol handler: %w", err)
 	}
 
+	if len(cfg.FileAssociations) > 0 {
+		ui.Notify("Registering file associations...")
+	}
 	for _, fa := range cfg.FileAssociations {
 		iconPath := ""
 		if fa.IconPath != "" {
@@ -169,6 +173,9 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 		record.FileAssociations = append(record.FileAssociations, payload.FileAssocEntry{Extension: fa.Extension, ProgID: progID})
 	}
 
+	if m.Shortcut.StartMenu || m.Shortcut.Desktop {
+		ui.Notify("Creating shortcuts...")
+	}
 	if m.Shortcut.StartMenu {
 		linkPath := filepath.Join(layout.StartMenuDir(scope, cfg.AppName), cfg.AppName+".lnk")
 		if err := shortcut.Create(shortcut.Spec{
@@ -314,7 +321,8 @@ func resolveProxy(ui installerUI, targetURL string) (host, port string) {
 	}
 }
 
-func extractPayload(root string, cfg *appconfig.AppConfig) error {
+func extractPayload(ui installerUI, root string, cfg *appconfig.AppConfig) error {
+	ui.Notify("Extracting application files...")
 	if err := writeEmbeddedFile(payload.RiggerExeName, layout.RiggerExePath(root)); err != nil {
 		return err
 	}
@@ -347,10 +355,32 @@ func extractPayload(root string, cfg *appconfig.AppConfig) error {
 	}
 
 	jreDir := layout.JREVersionDir(root, cfg.InitialJRE.Version)
-	if err := jreprovision.ProvisionLocal(root, tmpPath, cfg.InitialJRE.SHA256, jreDir); err != nil {
+	ui.Notify(fmt.Sprintf("Installing Java runtime %s...", cfg.InitialJRE.Version))
+	if err := jreprovision.ProvisionLocal(root, tmpPath, cfg.InitialJRE.SHA256, jreDir, jreExtractNotifier(ui, cfg.InitialJRE.Version)); err != nil {
 		return fmt.Errorf("installer: provision JRE: %w", err)
 	}
 	return nil
+}
+
+// jreExtractNotifier builds a jreprovision.ProgressFunc that posts unzip
+// percentage as it goes, deduped to one Notify per whole percentage point —
+// a JRE archive holds thousands of small files, and the underlying
+// archiveutil throttle (time-based) can still fire several calls that round
+// to the same percent, which would otherwise pad the wizard's log with
+// visually-identical lines.
+func jreExtractNotifier(ui installerUI, version string) jreprovision.ProgressFunc {
+	lastPct := -1
+	return func(done, total int64) {
+		if total <= 0 {
+			return
+		}
+		pct := int(float64(done) / float64(total) * 100)
+		if pct == lastPct {
+			return
+		}
+		lastPct = pct
+		ui.Notify(fmt.Sprintf("Installing Java runtime %s... %d%%", version, pct))
+	}
 }
 
 func writeEmbeddedFile(name, destPath string) error {

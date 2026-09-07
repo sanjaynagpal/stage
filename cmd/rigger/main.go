@@ -137,7 +137,8 @@ func run() (err error) {
 			return fmt.Errorf("required Java runtime %s is not installed at %s — reinstall or upgrade %s to fix this", m.Runtime.JavaVersion, jreDir, appID)
 		}
 		logger.Info("rigger: required Java runtime %s not found at %s — fetching from %s", m.Runtime.JavaVersion, jreDir, m.DownloadURL())
-		if err := jreprovision.Provision(fetchClient, root, m.DownloadURL(), m.Runtime.SHA256, jreDir); err != nil {
+		label := "Java runtime " + m.Runtime.JavaVersion
+		if err := jreprovision.Provision(fetchClient, root, m.DownloadURL(), m.Runtime.SHA256, jreDir, logProgress(logger, "downloading", label), logProgress(logger, "installing", label)); err != nil {
 			return fmt.Errorf("rigger: could not provision required Java runtime %s: %w", m.Runtime.JavaVersion, err)
 		}
 		logger.Info("rigger: provisioned Java runtime %s", m.Runtime.JavaVersion)
@@ -148,7 +149,8 @@ func run() (err error) {
 	if _, err := os.Stat(versionDir); err != nil {
 		artifactURL := m.ArtifactDownloadURL()
 		logger.Info("rigger: application version %s not found locally at %s — fetching from %s", m.Version, versionDir, artifactURL)
-		if err := jarprovision.Provision(fetchClient, root, artifactURL, m.ArtifactSHA256, versionDir); err != nil {
+		label := "application version " + m.Version
+		if err := jarprovision.Provision(fetchClient, root, artifactURL, m.ArtifactSHA256, versionDir, logProgress(logger, "downloading", label), logProgress(logger, "installing", label)); err != nil {
 			return fmt.Errorf("rigger: could not fetch application version %s: %w", m.Version, err)
 		}
 		logger.Info("rigger: fetched and installed application version %s", m.Version)
@@ -178,6 +180,27 @@ func run() (err error) {
 		JVMOptions: jvmOptions,
 		Arguments:  arguments,
 	})
+}
+
+// logProgress builds a jreprovision.ProgressFunc that logs what's happening
+// (verb: "downloading" or "installing") to label as an Info line.
+// rigger.exe has no progress-bar UI of its own — unlike cmd/installer, it
+// deliberately stays free of bubbletea/lipgloss so the always-loaded binary
+// doesn't carry that weight (the same reasoning doctor mode uses to prefer
+// internal/wizard over internal/tui, docs/REQUIREMENTS.md §24) — so a log
+// line, throttled by jreprovision's/archiveutil's own progressInterval, is
+// what an operator watching a console window (or rigger.log afterward)
+// sees during a JRE/jar fetch-and-extract that can otherwise run for
+// minutes with no visible feedback at all.
+func logProgress(logger *applog.Logger, verb, label string) jreprovision.ProgressFunc {
+	return func(done, total int64) {
+		const mb = 1024 * 1024
+		if total > 0 {
+			logger.Info("rigger: %s %s — %.0f%% (%.1f/%.1f MB)", verb, label, float64(done)/float64(total)*100, float64(done)/mb, float64(total)/mb)
+		} else {
+			logger.Info("rigger: %s %s — %.1f MB", verb, label, float64(done)/mb)
+		}
+	}
 }
 
 // loadManifest loads the locally cached manifest, then best-effort refreshes
