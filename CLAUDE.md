@@ -76,9 +76,13 @@ not via a separate `cmd/maintain` binary — see REQUIREMENTS.md §22 (Round 11)
 needs its own Authenticode signature and AV/SmartScreen reputation, and the constraint that
 motivated a separate process (a program generally can't overwrite its own running executable)
 doesn't apply to JRE provisioning, which never touches `rigger.exe`'s own file. `rigger.exe`
-binary self-update itself is still unimplemented (no manifest/appconfig field yet declares a
-rigger.exe version/URL/checksum); when built, it's expected to reuse `unins.exe`'s own
-self-copy-to-`%TEMP%`-and-relaunch trick rather than introduce a new binary.
+binary self-update **is** implemented (`internal/riggerupdate`, REQUIREMENTS.md §25) and does
+reuse `unins.exe`'s self-copy-to-`%TEMP%`-and-relaunch trick rather than a new binary: the
+installed `rigger.exe` copies itself to `%TEMP%`, that copy downloads/verifies/overwrites the
+real one and relaunches it. Any failure falls back to relaunching the existing binary — an update
+attempt must never be why the app doesn't open. `stagebuild` now also copies the freshly-built
+`rigger.exe` to `dist/rigger-<version>-win-x64.exe`, since operators need a standalone artifact to
+upload to their manifest server for this to have anything to fetch.
 
 ### Registry is the source of truth Rigger reads, not re-derives
 
@@ -121,7 +125,8 @@ installer is not a "no eviction needed" special case). `cmd/rigger/main.go` call
 directly, in-process, when a *running* Rigger finds a manifest wants a JRE version not on disk and
 `PackageMode` is `Dynamic` — per §12, "JRE acquisition is not duplicated logic in Rigger" means the
 routine is shared, not that it has to run out-of-process. The same download-and-verify core
-(`DownloadVerified`) is also reused by `internal/jarprovision` for on-demand app-jar delivery.
+(`DownloadVerified`) is also reused by `internal/jarprovision` for on-demand app-jar delivery and
+by `internal/riggerupdate` for downloading a new `rigger.exe` build during self-update.
 
 ### Protocol-handler launch path
 
@@ -197,18 +202,17 @@ lookup table; one install always has exactly one zone/proxy pair.
 
 ### Remaining empty placeholder packages
 
-Two directories are still empty, reserved for planned work per `docs/REQUIREMENTS.md` — not
+One directory is still empty, reserved for planned work per `docs/REQUIREMENTS.md` — not
 accidentally-empty or safe to repurpose without checking intent first: `internal/signing`
 (Authenticode — `stagebuild` reads `AppConfig.Signing` but only warns that it's unimplemented
-rather than acting on it) and `internal/riggerupdate`. (`cmd/maintain` was tried and deliberately
-removed — see above — not left as a placeholder; `internal/wizard` was tried, abandoned, and its
-name reused for a different, implemented package — see §23 — neither is in the same situation as
-these two genuinely still-open placeholders.) `internal/uninstallkey` is
-also still empty and likely vestigial — its intended purpose (the standard Add/Remove Programs
-Uninstall key) turned
-out to already be fully covered by `internal/winreg.WriteUninstallValues`/`DeleteUninstallValues`,
-which predates this package and is what `cmd/installer`/`cmd/uninstaller` actually use; check
-before assuming it needs filling in.
+rather than acting on it). (`cmd/maintain` was tried and deliberately removed — see above — not
+left as a placeholder; `internal/wizard` was tried, abandoned, and its name reused for a
+different, implemented package — see §23; `internal/riggerupdate` went from placeholder to
+implemented, §25 — none of these three are in the same situation as `internal/signing`.)
+`internal/uninstallkey` is also still empty and likely vestigial — its intended purpose (the
+standard Add/Remove Programs Uninstall key) turned out to already be fully covered by
+`internal/winreg.WriteUninstallValues`/`DeleteUninstallValues`, which predates this package and is
+what `cmd/installer`/`cmd/uninstaller` actually use; check before assuming it needs filling in.
 
 ### Testing end to end via `examples/abc`
 

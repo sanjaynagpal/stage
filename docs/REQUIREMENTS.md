@@ -695,3 +695,45 @@ static results page, no multi-screen flow — the checks are fast enough that no
 needed, unlike §19's original "potentially slow" framing, which was written before knowing what
 the actual checks would be). Manually verified end-to-end on a real install, including the worst
 case (a corrupted registry key) rendering one clear, actionable failure rather than crashing.
+
+## 25. Decisions (Round 14 — `rigger.exe` binary self-update) — CONFIRMED
+
+§13/§14 already decided the mechanism (self-copy-to-`%TEMP%`-and-relaunch, no companion exe,
+Dynamic-mode-gated) and §22 confirmed no companion exe would be needed. What was still missing —
+a versioning scheme for `rigger.exe` itself, and where the update declaration/artifact live —
+is resolved here.
+
+- **Versioning scheme**: a hardcoded `const Version` in `internal/riggerupdate`, bumped manually
+  per Stage release. This repo doesn't use git tags today, and introducing that infra (tag-driven
+  `-ldflags` injection) wasn't warranted just for this — the simplest option that works.
+- **New manifest field**: `rigger: {version, sha256}` (`manifest.RiggerSpec`), mirroring
+  `RuntimeSpec`'s shape. Lives in the manifest, not the registry, consistent with `supportEmail`
+  (§24) and the JRE/jar fields — it's exactly the kind of thing `ManifestServerUrl` polling
+  already refreshes every launch. A declared `version` with no `sha256` is treated as
+  misconfigured and skipped, never trusted (mirrors `RuntimeSpec.SHA256`'s existing looseness).
+- **Download convention**: `Manifest.RiggerDownloadURL()`, the same pattern as `DownloadURL()`/
+  `ArtifactDownloadURL()` — the manifest's final path segment replaced with
+  `rigger/<version>-win-x64.exe`.
+- **Distribution artifact**: `stagebuild` now copies the freshly-built `rigger.exe` to
+  `dist/rigger-<version>-win-x64.exe` and prints the exact manifest snippet (version + computed
+  checksum) an operator needs to declare — closing a real gap this feature surfaced: `rigger.exe`
+  previously only ever existed embedded inside a specific app's installer, with no standalone
+  artifact an operator could ever upload to their manifest server for self-update to fetch. Stage
+  still doesn't upload anywhere itself, matching how JRE/jar archives already work — the
+  operator's own deployment pipeline owns the manifest server.
+- **Failure behavior**: any failure — spawning the `%TEMP%` copy, downloading, the checksum
+  check — falls back to relaunching the existing, unmodified `rigger.exe` rather than failing the
+  launch outright. An update attempt must never be why the app doesn't open. Manually verified:
+  a genuine end-to-end update (old binary detects a new version, downloads, verifies, overwrites,
+  relaunches — confirmed via checksum that the installed binary was actually replaced, and that
+  the relaunched, now-current binary does *not* re-trigger another update, avoiding a loop), and
+  a real failure path (a `%TEMP%` file-write collision from two rapid update attempts) correctly
+  falling back to launching the prior version rather than failing.
+- **Known limitation, accepted for v1**: `BeginSelfUpdate` writes to a fixed temp filename
+  (`stage-rigger-update-<appID>.exe`), so two self-update attempts in quick succession (before
+  Windows has released the first attempt's file handle) can collide — observed directly during
+  manual testing. The collision is caught by the general failure-falls-back-to-current-version
+  behavior above (the second attempt just fails cleanly and the app still launches on the
+  existing version), and self-heals on the next launch once the earlier temp process has fully
+  exited. Given real version bumps happen far apart in practice, a randomized temp filename to
+  close this narrow race wasn't judged worth the complexity for v1.
