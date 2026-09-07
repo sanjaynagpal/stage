@@ -26,6 +26,11 @@
 # the repo, under %LocalAppData%\ABC)
 /examples/abc/fakeserver/served/
 
+# Throwaway harness to preview internal/tui's wizard styling interactively
+# without a real cmd/installer run — local dev tool, not shipped, kept on
+# disk but deliberately never committed
+/cmd/tuidemo/
+
 # Editor/OS cruft
 .vscode/
 .idea/
