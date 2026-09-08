@@ -37,12 +37,29 @@ type EnvironmentConfig struct {
 	Zones map[manifest.NetworkZone]ZoneConfig `json:"zones"`
 }
 
-// ZoneConfig points to the initial manifest bundled for one (Environment,
-// NetworkZone) pair, verbatim, plus the server URL it was fetched from
-// (cross-checked against the manifest's own ManifestServerURL field).
+// ZoneConfig points to the initial manifest for one (Environment,
+// NetworkZone) pair, plus the server URL it was fetched from (cross-checked
+// against the manifest's own ManifestServerURL field). ManifestPath is
+// always loaded and validated at build time — stagebuild's safety net
+// (Manifest.Validate()'s placeholder checks) — regardless of FetchAtInstall.
 type ZoneConfig struct {
 	ManifestPath      string `json:"manifestPath"`
 	ManifestServerURL string `json:"manifestServerUrl"`
+	// FetchAtInstall, when true, means the installer fetches the live
+	// manifest from ManifestServerURL at install time instead of embedding
+	// ManifestPath's snapshot into the payload — avoiding staleness for
+	// apps whose manifest changes often between a build and an end user
+	// actually running the installer. Default false bundles ManifestPath
+	// verbatim, exactly as before this field existed.
+	FetchAtInstall bool `json:"fetchAtInstall,omitempty"`
+	// AuthURL, when set, is an operator-hosted authentication page.
+	// cmd/installer creates this zone's Start Menu/Desktop shortcuts to
+	// invoke `rigger.exe start browser -url <AuthURL>` instead of launching
+	// directly — the browser-first auth flow (docs/REQUIREMENTS.md §27):
+	// authenticate first, then the auth server's redirect to this app's
+	// registered protocol scheme carries a token that actually starts the
+	// JVM. Default "" leaves shortcuts launching directly, unchanged.
+	AuthURL string `json:"authUrl,omitempty"`
 }
 
 // JREBundleSpec identifies the JRE archive physically extracted at install

@@ -152,13 +152,23 @@ switchable post-install:
 ```go
 Environments map[manifest.Environment]EnvironmentConfig
 // EnvironmentConfig{ Zones map[manifest.NetworkZone]ZoneConfig }
-// ZoneConfig{ ManifestPath, ManifestServerURL string }
+// ZoneConfig{ ManifestPath, ManifestServerURL string; FetchAtInstall bool }
 ```
 
 Unlike `Environment` (a closed `DEV`/`TEST`/`PROD` enum — a release stage every app shares),
 `NetworkZone` is a **validated free-form string**, not an enum: zone names describe one
 deployment's specific network topology (a corporate intranet, an extranet like Radianz), which
 varies per company, the same way `ProtocolScheme` is already free-form rather than fixed.
+
+Each zone picks one of two manifest **delivery modes** (`docs/REQUIREMENTS.md` §26):
+`ManifestPath` is always loaded and validated at build time either way — stagebuild's safety
+net (`Manifest.Validate()`'s placeholder checks) — but by default (`FetchAtInstall: false`) that
+snapshot is also embedded verbatim into the payload, same as before this field existed. A zone
+whose manifest changes often between a build and an end user actually running the installer can
+instead set `FetchAtInstall: true`: nothing is embedded, and `cmd/installer` fetches the live
+manifest from `ManifestServerURL` at install time. `examples/abc/appconfig.json`'s `Radianz`
+zone illustrates the latter mode (it isn't wired into `prepare-stagebuild-fixtures.ps1`, which
+still builds `Internet`).
 
 ### 2.8 Tiered feedback — how Rigger reports what it's doing
 
@@ -191,17 +201,25 @@ approach:
    because `//go:embed` fails to compile against a missing or empty directory) with:
    `rigger.exe`/`unins.exe` (both freshly `go build`-compiled), the JRE archive copied
    **verbatim** (not extracted — extraction and SHA-256 verification happen at install time, as
-   defense-in-depth), the resolved manifest, a copy of the app config, the icon/license, and a
-   `build.json` (`internal/payload.BuildMeta`) recording which (Environment, NetworkZone) this
-   specific build is for — the installer has no other way to know its own zone, since
-   `appconfig.json` alone enumerates every zone the app could ever target.
+   defense-in-depth), the resolved manifest **unless the zone is `FetchAtInstall` (§26)**, a
+   copy of the app config, the icon/license, and a `build.json` (`internal/payload.BuildMeta`)
+   recording which (Environment, NetworkZone) this specific build is for, its
+   `ManifestServerURL`, and whether the manifest was bundled — the installer has no other way to
+   know its own zone, since `appconfig.json` alone enumerates every zone the app could ever
+   target, and (for `FetchAtInstall` zones) no other way to know where to fetch from before it
+   has a manifest at all.
 3. Really compiles `cmd/installer` (`//go:embed all:payload`), then wipes the payload directory
    back to just the placeholder on success (left populated for inspection on failure). An
    exclusive lock file guards against two concurrent builds corrupting each other.
 
-`cmd/installer` (console UI, §16): welcome/license → prerequisite checks (disk space sized from
-the embedded files, including the JRE zip's *uncompressed* entry sizes; a running-process check
-via `internal/procscan` with a Retry/Cancel prompt) → package-mode and proxy choices (`AllUsers`
+`cmd/installer` (console UI, §16): acquire the manifest (either read straight out of the
+embedded payload, or, for a `FetchAtInstall` zone — §26 — check network reachability and fetch
+it live from `BuildMeta.ManifestServerURL` via `internal/manifest.Fetch`, the same primitive
+`cmd/rigger`'s post-install polling uses, hard-failing the install if it's unreachable since
+there's no bundled fallback at this point) → welcome/license → prerequisite checks (disk space
+sized from the embedded files, including the JRE zip's *uncompressed* entry sizes; a
+running-process check via `internal/procscan` with a Retry/Cancel prompt) → package-mode and
+proxy choices (`AllUsers`
 forces `Static`; `PerUser` defaults to `Dynamic` with a prompt; `internal/proxydetect` result
 shown with an accept/override/none prompt) → extraction (`internal/jreprovision.ProvisionLocal`
 against a temp copy of the embedded JRE zip — the same function, and the same `MaxRetainedVersions`
@@ -209,9 +227,11 @@ eviction, used for both a fresh install and an upgrade-in-place re-run) → regi
 (`winreg.WriteAppValues`/`WriteUninstallValues`, `internal/protocolhandler.Register` always,
 `internal/fileassoc.Register` only if declared) → shortcuts (`internal/shortcut`, raw COM —
 `golang.org/x/sys/windows` has no `IShellLinkW`/`IPersistFile` bindings, so this package binds
-`CoCreateInstance` manually and drives the vtables directly) → an `internal/payload.InstallRecord`
-receipt (exact protocol scheme, file-association ProgIDs, shortcut paths) written for the
-uninstaller → optional immediate launch.
+`CoCreateInstance` manually and drives the vtables directly; for a zone built with `AuthURL` set,
+`Spec.Arguments` is `start browser -url <AuthURL>` instead of empty, so the shortcut opens
+browser-based authentication rather than launching the JVM directly — `docs/REQUIREMENTS.md`
+§27) → an `internal/payload.InstallRecord` receipt (exact protocol scheme, file-association
+ProgIDs, shortcut paths) written for the uninstaller → optional immediate launch.
 
 `unins.exe` (console UI): a Windows install directory can't delete its own running exe, so this
 is self-copy-and-relaunch — the first invocation copies itself to `%TEMP%` and re-execs with

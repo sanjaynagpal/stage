@@ -12,6 +12,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -20,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sanjaynagpal/stage/internal/appconfig"
 	"github.com/sanjaynagpal/stage/internal/diskspace"
@@ -93,11 +95,11 @@ func main() {
 }
 
 func run(ui installerUI, cfg *appconfig.AppConfig) error {
-	m, err := loadEmbeddedManifest()
+	meta, err := loadEmbeddedBuildMeta()
 	if err != nil {
 		return err
 	}
-	meta, err := loadEmbeddedBuildMeta()
+	m, err := acquireManifest(ui, meta)
 	if err != nil {
 		return err
 	}
@@ -120,7 +122,7 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 	root := layout.RootDir(scope, cfg.AppID)
 	dataDir := layout.DataDir(cfg.AppID)
 
-	requiredBytes, err := estimateRequiredBytes()
+	requiredBytes, err := estimateRequiredBytes(meta.ManifestBundled)
 	if err != nil {
 		return err
 	}
@@ -143,7 +145,7 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 		return fmt.Errorf("installer: create %s: %w", dataDir, err)
 	}
 
-	if err := extractPayload(ui, root, cfg); err != nil {
+	if err := extractPayload(ui, root, cfg, m, meta.ManifestBundled); err != nil {
 		return err
 	}
 
@@ -177,11 +179,22 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 		record.FileAssociations = append(record.FileAssociations, payload.FileAssocEntry{Extension: fa.Extension, ProgID: progID})
 	}
 
+	// A zone built with AuthURL set (docs/REQUIREMENTS.md §27) starts with
+	// browser-based authentication rather than launching the JVM directly —
+	// shortcuts invoke rigger.exe's "start browser" mode, which opens the
+	// auth page and exits; the auth server's redirect to this app's
+	// registered protocol scheme is what actually launches the JVM, with a
+	// token attached.
+	shortcutArguments := ""
+	if meta.AuthURL != "" {
+		shortcutArguments = "start browser -url " + meta.AuthURL
+	}
+
 	if m.Shortcut.StartMenu {
 		linkPath := filepath.Join(layout.StartMenuDir(scope, cfg.AppName), cfg.AppName+".lnk")
 		ui.Notify("Creating Start Menu shortcut at `" + linkPath + "`...")
 		if err := shortcut.Create(shortcut.Spec{
-			Path: linkPath, TargetPath: riggerPath, Description: m.Shortcut.Description, IconPath: layout.IconPath(root),
+			Path: linkPath, TargetPath: riggerPath, Description: m.Shortcut.Description, IconPath: layout.IconPath(root), Arguments: shortcutArguments,
 		}); err != nil {
 			return fmt.Errorf("installer: create Start Menu shortcut: %w", err)
 		}
@@ -191,7 +204,7 @@ func run(ui installerUI, cfg *appconfig.AppConfig) error {
 		linkPath := filepath.Join(layout.DesktopDir(scope), cfg.AppName+".lnk")
 		ui.Notify("Creating Desktop shortcut at `" + linkPath + "`...")
 		if err := shortcut.Create(shortcut.Spec{
-			Path: linkPath, TargetPath: riggerPath, Description: m.Shortcut.Description, IconPath: layout.IconPath(root),
+			Path: linkPath, TargetPath: riggerPath, Description: m.Shortcut.Description, IconPath: layout.IconPath(root), Arguments: shortcutArguments,
 		}); err != nil {
 			return fmt.Errorf("installer: create Desktop shortcut: %w", err)
 		}
@@ -230,6 +243,32 @@ func loadEmbeddedManifest() (*manifest.Manifest, error) {
 	return manifest.Parse(data)
 }
 
+// acquireManifest gets this install's manifest either from the embedded
+// payload (the default) or, for a zone built with fetchAtInstall (§26), by
+// fetching the live manifest from meta.ManifestServerURL — trading the
+// bundled snapshot's staleness for a hard requirement that the server be
+// reachable during install (no cached fallback exists yet at this point,
+// unlike Rigger's own post-install refresh, docs/REQUIREMENTS.md §9b).
+func acquireManifest(ui installerUI, meta payload.BuildMeta) (*manifest.Manifest, error) {
+	if meta.ManifestBundled {
+		return loadEmbeddedManifest()
+	}
+
+	ui.Notify(fmt.Sprintf("Checking network access to %s...", meta.ManifestServerURL))
+	proxy, err := proxydetect.DetectForURL(meta.ManifestServerURL)
+	if err != nil {
+		proxy = proxydetect.Result{}
+	}
+	m, err := manifest.Fetch(meta.ManifestServerURL, proxydetect.Client(proxy, 15*time.Second))
+	if err != nil {
+		return nil, fmt.Errorf("this app requires network access to %s during install, and it could not be reached: %w", meta.ManifestServerURL, err)
+	}
+	if m.ManifestServerURL != meta.ManifestServerURL {
+		return nil, fmt.Errorf("manifest fetched from %s declares a different manifestServerUrl (%q) — refusing to proceed", meta.ManifestServerURL, m.ManifestServerURL)
+	}
+	return m, nil
+}
+
 func loadEmbeddedBuildMeta() (payload.BuildMeta, error) {
 	data, err := payloadFS.ReadFile("payload/" + payload.BuildMetaName)
 	if err != nil {
@@ -240,10 +279,16 @@ func loadEmbeddedBuildMeta() (payload.BuildMeta, error) {
 
 // estimateRequiredBytes sums the embedded files' sizes (the JRE archive's
 // *uncompressed* entries, read directly out of the embedded zip bytes) plus
-// a 20% safety margin, for the disk-space prerequisite check.
-func estimateRequiredBytes() (uint64, error) {
+// a 20% safety margin, for the disk-space prerequisite check. bundled
+// reports whether payload/manifest.json exists to be stat'd — a
+// fetch-at-install build (§26) has no such file.
+func estimateRequiredBytes(bundled bool) (uint64, error) {
 	var total uint64
-	for _, name := range []string{payload.RiggerExeName, payload.UninsExeName, payload.ManifestName, payload.IconName} {
+	names := []string{payload.RiggerExeName, payload.UninsExeName, payload.IconName}
+	if bundled {
+		names = append(names, payload.ManifestName)
+	}
+	for _, name := range names {
 		info, err := fs.Stat(payloadFS, "payload/"+name)
 		if err != nil {
 			return 0, fmt.Errorf("installer: stat embedded %s: %w", name, err)
@@ -297,18 +342,21 @@ func checkPrerequisites(ui installerUI, root, appName string, requiredBytes uint
 }
 
 func resolveProxy(ui installerUI, targetURL string) (host, port string) {
+	ui.Notify("Proxy configuration")
 	result, err := proxydetect.DetectForURL(targetURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "installer: warning: proxy detection failed (%v); assuming a direct connection\n", err)
 		result = proxydetect.Result{}
 	}
+	defaultDesc := "direct connection — no proxy required"
 	if result.Empty() {
-		ui.Notify("Detected proxy: none (direct connection)")
+		ui.Notify("Detected proxy: none — the default is a direct connection; no proxy is required.")
 	} else {
+		defaultDesc = fmt.Sprintf("proxy %s:%s", result.Host, result.Port)
 		ui.Notify(fmt.Sprintf("Detected proxy: `%s:%s`", result.Host, result.Port))
 	}
 
-	override := ui.ReadLine("Press Enter to accept, enter a host:port to override, or type 'none' for a direct connection: ")
+	override := ui.ReadLine(fmt.Sprintf("Proxy configuration — press Enter to accept the detected default (%s), enter a host:port to use a specific proxy, or type 'none' for a direct connection: ", defaultDesc))
 	switch {
 	case override == "":
 		return result.Host, result.Port
@@ -324,7 +372,7 @@ func resolveProxy(ui installerUI, targetURL string) (host, port string) {
 	}
 }
 
-func extractPayload(ui installerUI, root string, cfg *appconfig.AppConfig) error {
+func extractPayload(ui installerUI, root string, cfg *appconfig.AppConfig, m *manifest.Manifest, manifestBundled bool) error {
 	ui.Notify("Extracting application files to `" + root + "`...")
 	if err := writeEmbeddedFile(payload.RiggerExeName, layout.RiggerExePath(root)); err != nil {
 		return err
@@ -335,8 +383,22 @@ func extractPayload(ui installerUI, root string, cfg *appconfig.AppConfig) error
 	if err := writeEmbeddedFile(payload.IconName, layout.IconPath(root)); err != nil {
 		return err
 	}
-	if err := writeEmbeddedFile(payload.ManifestName, layout.ManifestPath(root)); err != nil {
-		return err
+	// A FetchAtInstall zone (docs/REQUIREMENTS.md §26) has no
+	// payload/manifest.json to copy — write the manifest already fetched
+	// by acquireManifest instead, so Rigger still has an initial on-disk
+	// cache to fall back to on a later launch with no network (§9b).
+	if manifestBundled {
+		if err := writeEmbeddedFile(payload.ManifestName, layout.ManifestPath(root)); err != nil {
+			return err
+		}
+	} else {
+		data, err := json.MarshalIndent(m, "", "  ")
+		if err != nil {
+			return fmt.Errorf("installer: marshal fetched manifest: %w", err)
+		}
+		if err := os.WriteFile(layout.ManifestPath(root), data, 0o644); err != nil {
+			return fmt.Errorf("installer: write %s: %w", layout.ManifestPath(root), err)
+		}
 	}
 
 	jreData, err := payloadFS.ReadFile("payload/" + payload.JREArchiveName)

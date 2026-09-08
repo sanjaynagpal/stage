@@ -133,6 +133,63 @@ func TestValidateRejectsBadZoneKey(t *testing.T) {
 	}
 }
 
+func TestParseRoundTripsFetchAtInstall(t *testing.T) {
+	data := []byte(`{
+		"appId": "ABC",
+		"appName": "ABC",
+		"publisher": "Acme Corp",
+		"protocolScheme": "acme-abc",
+		"iconPath": "app.ico",
+		"licensePath": "LICENSE.rtf",
+		"environments": {"PROD": {"zones": {"Radianz": {"manifestPath": "manifests/prod.json", "manifestServerUrl": "https://example.com/abc/prod/manifest.json", "fetchAtInstall": true}}}},
+		"initialJre": {"version": "21.0.2+13", "archivePath": "jre/21.0.2+13-win-x64.zip", "sha256": "` + strings.Repeat("a", 64) + `"},
+		"outputName": "ABCSetup.exe"
+	}`)
+	c, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if !c.Environments[manifest.EnvProd].Zones["Radianz"].FetchAtInstall {
+		t.Fatalf("expected fetchAtInstall to round-trip as true, got: %+v", c.Environments[manifest.EnvProd].Zones["Radianz"])
+	}
+}
+
+func TestParseRoundTripsAuthURL(t *testing.T) {
+	data := []byte(`{
+		"appId": "ABC",
+		"appName": "ABC",
+		"publisher": "Acme Corp",
+		"protocolScheme": "acme-abc",
+		"iconPath": "app.ico",
+		"licensePath": "LICENSE.rtf",
+		"environments": {"PROD": {"zones": {"Radianz": {"manifestPath": "manifests/prod.json", "manifestServerUrl": "https://example.com/abc/prod/manifest.json", "authUrl": "https://example.com/abc/authentication.html"}}}},
+		"initialJre": {"version": "21.0.2+13", "archivePath": "jre/21.0.2+13-win-x64.zip", "sha256": "` + strings.Repeat("a", 64) + `"},
+		"outputName": "ABCSetup.exe"
+	}`)
+	c, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	want := "https://example.com/abc/authentication.html"
+	if got := c.Environments[manifest.EnvProd].Zones["Radianz"].AuthURL; got != want {
+		t.Fatalf("AuthURL = %q, want %q", got, want)
+	}
+}
+
+func TestAuthURLDefaultsEmpty(t *testing.T) {
+	c := validConfig()
+	if c.Environments[manifest.EnvProd].Zones["Internet"].AuthURL != "" {
+		t.Fatal("expected AuthURL to default to empty when omitted")
+	}
+}
+
+func TestFetchAtInstallDefaultsFalse(t *testing.T) {
+	c := validConfig()
+	if c.Environments[manifest.EnvProd].Zones["Internet"].FetchAtInstall {
+		t.Fatal("expected FetchAtInstall to default to false when omitted")
+	}
+}
+
 func TestValidateRejectsMissingZoneManifestFields(t *testing.T) {
 	c := validConfig()
 	c.Environments[manifest.EnvProd] = EnvironmentConfig{

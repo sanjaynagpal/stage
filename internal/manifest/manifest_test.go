@@ -1,6 +1,9 @@
 package manifest
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -282,6 +285,53 @@ func TestRiggerDownloadURLConvention(t *testing.T) {
 	want := "https://example.com/abc/prod/rigger/1.2.0-win-x64.exe"
 	if got != want {
 		t.Fatalf("RiggerDownloadURL() = %q, want %q", got, want)
+	}
+}
+
+func TestFetchReturnsParsedManifest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := json.Marshal(validManifest())
+		if err != nil {
+			t.Fatalf("marshal fixture manifest: %v", err)
+		}
+		w.Write(data)
+	}))
+	defer srv.Close()
+
+	m, err := Fetch(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("unexpected fetch error: %v", err)
+	}
+	if m.AppID != "ABC" {
+		t.Fatalf("unexpected fetched manifest: %+v", m)
+	}
+}
+
+func TestFetchRejectsNonOKStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if _, err := Fetch(srv.URL, srv.Client()); err == nil {
+		t.Fatal("expected error for non-200 status")
+	}
+}
+
+func TestFetchRejectsInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	if _, err := Fetch(srv.URL, srv.Client()); err == nil {
+		t.Fatal("expected error for invalid JSON response")
+	}
+}
+
+func TestFetchRejectsEmptyURL(t *testing.T) {
+	if _, err := Fetch("", http.DefaultClient); err == nil {
+		t.Fatal("expected error for empty URL")
 	}
 }
 

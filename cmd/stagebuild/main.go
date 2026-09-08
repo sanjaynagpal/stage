@@ -85,7 +85,7 @@ func run() error {
 		return err
 	}
 
-	if err := populateAndBuild(repoRoot, payloadDir, configDir, cfg, env, zone, manifestPath); err != nil {
+	if err := populateAndBuild(repoRoot, payloadDir, configDir, cfg, env, zone, manifestPath, zoneCfg); err != nil {
 		fmt.Fprintf(os.Stderr, "stagebuild: build failed, leaving %s populated for inspection\n", payloadDir)
 		return err
 	}
@@ -98,7 +98,7 @@ func run() error {
 	return nil
 }
 
-func populateAndBuild(repoRoot, payloadDir, configDir string, cfg *appconfig.AppConfig, env manifest.Environment, zone manifest.NetworkZone, manifestPath string) error {
+func populateAndBuild(repoRoot, payloadDir, configDir string, cfg *appconfig.AppConfig, env manifest.Environment, zone manifest.NetworkZone, manifestPath string, zoneCfg appconfig.ZoneConfig) error {
 	goBuild := func(outPath, pkg string) error {
 		cmd := exec.Command("go", "build", "-o", outPath, pkg)
 		cmd.Dir = repoRoot
@@ -123,8 +123,10 @@ func populateAndBuild(repoRoot, payloadDir, configDir string, cfg *appconfig.App
 	if err := copyFile(resolvePath(configDir, cfg.InitialJRE.ArchivePath), filepath.Join(payloadDir, payload.JREArchiveName)); err != nil {
 		return fmt.Errorf("stagebuild: copy JRE archive: %w", err)
 	}
-	if err := copyFile(manifestPath, filepath.Join(payloadDir, payload.ManifestName)); err != nil {
-		return fmt.Errorf("stagebuild: copy manifest: %w", err)
+	if !zoneCfg.FetchAtInstall {
+		if err := copyFile(manifestPath, filepath.Join(payloadDir, payload.ManifestName)); err != nil {
+			return fmt.Errorf("stagebuild: copy manifest: %w", err)
+		}
 	}
 
 	cfgData, err := json.MarshalIndent(cfg, "", "  ")
@@ -142,7 +144,14 @@ func populateAndBuild(repoRoot, payloadDir, configDir string, cfg *appconfig.App
 		return fmt.Errorf("stagebuild: copy license: %w", err)
 	}
 
-	if err := payload.SaveBuildMeta(filepath.Join(payloadDir, payload.BuildMetaName), payload.BuildMeta{Environment: env, NetworkZone: zone}); err != nil {
+	buildMeta := payload.BuildMeta{
+		Environment:       env,
+		NetworkZone:       zone,
+		ManifestServerURL: zoneCfg.ManifestServerURL,
+		ManifestBundled:   !zoneCfg.FetchAtInstall,
+		AuthURL:           zoneCfg.AuthURL,
+	}
+	if err := payload.SaveBuildMeta(filepath.Join(payloadDir, payload.BuildMetaName), buildMeta); err != nil {
 		return fmt.Errorf("stagebuild: write build metadata: %w", err)
 	}
 

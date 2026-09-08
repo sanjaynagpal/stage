@@ -123,6 +123,9 @@ $servedDir = Join-Path $abcDir "fakeserver/served/abc"
 New-Item -ItemType Directory -Force -Path $servedDir | Out-Null
 Set-Content -Path (Join-Path $servedDir "manifest.json") -Value $substituted -NoNewline
 
+Write-Host "Copying fakeserver-served authentication page..."
+Copy-Item -Force (Join-Path $abcDir "fakeserver/public/abc/authentication.html") (Join-Path $servedDir "authentication.html")
+
 Write-Host "`nWriting HKCU:\Software\ABC..."
 $key = "HKCU:\Software\ABC"
 New-Item -Path $key -Force | Out-Null

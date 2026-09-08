@@ -26,6 +26,7 @@ type Spec struct {
 	Description string
 	IconPath    string // optional; "" means no explicit icon
 	IconIndex   int32
+	Arguments   string // optional; "" means no command-line arguments
 }
 
 // Create builds a .lnk at spec.Path pointing at spec.TargetPath, via
@@ -53,6 +54,11 @@ func Create(spec Spec) error {
 	}
 	if err := link.SetDescription(spec.Description); err != nil {
 		return err
+	}
+	if spec.Arguments != "" {
+		if err := link.SetArguments(spec.Arguments); err != nil {
+			return err
+		}
 	}
 	if spec.IconPath != "" {
 		if err := link.SetIconLocation(spec.IconPath, spec.IconIndex); err != nil {
@@ -169,6 +175,14 @@ func (o *iShellLinkW) SetDescription(desc string) error {
 		return fmt.Errorf("shortcut: encode description: %w", err)
 	}
 	return hrToError("SetDescription", o.call(o.vtbl.SetDescription, uintptr(unsafe.Pointer(p))))
+}
+
+func (o *iShellLinkW) SetArguments(args string) error {
+	p, err := windows.UTF16PtrFromString(args)
+	if err != nil {
+		return fmt.Errorf("shortcut: encode arguments: %w", err)
+	}
+	return hrToError("SetArguments", o.call(o.vtbl.SetArguments, uintptr(unsafe.Pointer(p))))
 }
 
 func (o *iShellLinkW) SetIconLocation(path string, index int32) error {
