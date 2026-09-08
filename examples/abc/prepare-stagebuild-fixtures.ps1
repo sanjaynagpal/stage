@@ -56,13 +56,17 @@ Write-Host "Artifact SHA256: $artifactSha256"
 
 Write-Host "`nWriting manifest.generated.json..."
 $manifestTemplate = Get-Content (Join-Path $abcDir "fakeserver/public/abc/manifest.json") -Raw
-$manifestResolved = $manifestTemplate.Replace("__JAVA_VERSION__", $javaVersion).Replace("__ARTIFACT_SHA256__", $artifactSha256).Replace("__JRE_SHA256__", $sha256)
+$jarDelivery = "`"artifactSha256`": `"$artifactSha256`""
+$manifestResolved = $manifestTemplate.Replace("__JAVA_VERSION__", $javaVersion).Replace("__JAR_DELIVERY__", $jarDelivery).Replace("__JRE_SHA256__", $sha256)
 Set-Content -Path (Join-Path $abcDir "manifest.generated.json") -Value $manifestResolved -NoNewline
 
 Write-Host "`nWriting fakeserver-served copy of the manifest..."
 $servedDir = Join-Path $abcDir "fakeserver/served/abc"
 New-Item -ItemType Directory -Force -Path $servedDir | Out-Null
 Set-Content -Path (Join-Path $servedDir "manifest.json") -Value $manifestResolved -NoNewline
+
+Write-Host "Copying fakeserver-served authentication page..."
+Copy-Item -Force (Join-Path $abcDir "fakeserver/public/abc/authentication.html") (Join-Path $servedDir "authentication.html")
 
 Write-Host "Writing appconfig.generated.json..."
 $appconfigTemplate = Get-Content (Join-Path $abcDir "appconfig.json") -Raw

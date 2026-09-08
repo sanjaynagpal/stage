@@ -7,6 +7,8 @@ package manifest
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -168,6 +170,29 @@ func Parse(data []byte) (*Manifest, error) {
 		return nil, err
 	}
 	return &m, nil
+}
+
+// Fetch retrieves and parses a manifest from url using client. Shared by
+// cmd/rigger (post-install polling, with a cached fallback on failure) and
+// cmd/installer (fetch-at-install delivery, §26 — no fallback: a failure
+// here fails the install).
+func Fetch(url string, client *http.Client) (*Manifest, error) {
+	if url == "" {
+		return nil, fmt.Errorf("manifest: no manifest server URL available")
+	}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: fetch %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("manifest: fetch %s: unexpected HTTP status %s", url, resp.Status)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: fetch %s: %w", url, err)
+	}
+	return Parse(data)
 }
 
 // Validate checks that the manifest is structurally sound: required fields

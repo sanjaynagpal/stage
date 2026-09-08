@@ -7,10 +7,11 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -58,12 +59,90 @@ func main() {
 		}
 		return
 	}
-	if err := run(); err != nil {
+	// "start browser -url <URL>" / "start manifest -url <URL>"
+	// (docs/REQUIREMENTS.md §27) — the browser-first auth flow. A Desktop/
+	// Start Menu shortcut for an AuthURL zone invokes "start browser" to
+	// open the auth page and exit; "start manifest" is a manual/debug entry
+	// point, not used by any shortcut — see runStartManifest's doc comment
+	// for why trusting its -url as the fetch target is safe there but not
+	// on the protocol-handler path below.
+	if len(os.Args) > 2 && os.Args[1] == "start" {
+		switch os.Args[2] {
+		case "browser":
+			url, err := parseURLFlag("start browser", os.Args[3:])
+			if err != nil {
+				uierror.Fatalf("Invalid Arguments", "%v", err)
+				return
+			}
+			if err := openBrowser(url); err != nil {
+				uierror.Fatalf("Could Not Open Browser", "%v", err)
+			}
+			return
+		case "manifest":
+			url, err := parseURLFlag("start manifest", os.Args[3:])
+			if err != nil {
+				uierror.Fatalf("Invalid Arguments", "%v", err)
+				return
+			}
+			if err := runStartManifest(url); err != nil {
+				uierror.Fatalf("Application Launch Failed", "%v", err)
+			}
+			return
+		default:
+			uierror.Fatalf("Invalid Arguments", "rigger: unknown start mode %q (expected \"browser\" or \"manifest\")", os.Args[2])
+			return
+		}
+	}
+	if err := run(nil); err != nil {
 		uierror.Fatalf("Application Launch Failed", "%v", err)
 	}
 }
 
-func run() (err error) {
+// parseURLFlag parses a required -url flag from args, used by both "start
+// browser" and "start manifest".
+func parseURLFlag(name string, args []string) (string, error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	url := fs.String("url", "", "URL")
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if *url == "" {
+		return "", fmt.Errorf("rigger: %s requires -url", name)
+	}
+	return *url, nil
+}
+
+// openBrowser opens the OS default browser at url and returns immediately —
+// rundll32 is the standard way to do this on Windows without shell-quoting
+// pitfalls (docs/REQUIREMENTS.md §27).
+func openBrowser(url string) error {
+	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+}
+
+// runStartManifest is "start manifest -url <URL>": a manual/debug entry
+// point, not invoked by any shortcut. url's own query string supplies
+// token/other ${uri.X} params (docs/REQUIREMENTS.md §27), and url itself is
+// trusted as the manifest fetch target — safe here because this mode only
+// ever runs because a person deliberately typed the command, unlike the
+// protocol-handler path in run(), which never trusts an externally
+// redirected URL as a fetch target (only the token it carries).
+func runStartManifest(rawURL string) error {
+	uriParams, err := uriparse.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("rigger: could not parse %q: %w", rawURL, err)
+	}
+	return run(&manifestOverride{manifestURL: rawURL, uriParams: uriParams})
+}
+
+// manifestOverride bypasses run()'s normal argv-based invocation detection
+// (shortcut vs. protocol handler) — used only by runStartManifest's "start
+// manifest -url" debug entry point.
+type manifestOverride struct {
+	manifestURL string
+	uriParams   map[string]string
+}
+
+func run(override *manifestOverride) (err error) {
 	var logger *applog.Logger
 	// progressUI is opened lazily, only if a fetch actually turns out to be
 	// needed below — an ordinary launch (everything already on disk) never
@@ -99,7 +178,12 @@ func run() (err error) {
 
 	invocation := "shortcut"
 	var uriParams map[string]string
-	if len(os.Args) > 1 && uriparse.LooksLikeInvocation(os.Args[1], appValues.ProtocolScheme) {
+	manifestURL := appValues.ManifestServerURL
+	if override != nil {
+		invocation = "manifest (explicit URL)"
+		uriParams = override.uriParams
+		manifestURL = override.manifestURL
+	} else if len(os.Args) > 1 && uriparse.LooksLikeInvocation(os.Args[1], appValues.ProtocolScheme) {
 		invocation = "protocol handler"
 		uriParams, err = uriparse.Parse(os.Args[1])
 		if err != nil {
@@ -115,11 +199,19 @@ func run() (err error) {
 	// A short-timeout client for the manifest poll (every launch — a slow
 	// manifest server shouldn't stall an ordinary launch for long) and a
 	// separate long-timeout client for the two on-demand archive fetches
-	// below, which are rare but can legitimately take minutes.
+	// below, which are rare but can legitimately take minutes. When this
+	// launch carries an auth token (docs/REQUIREMENTS.md §27), both clients
+	// also send it as a Bearer header on every request they make — the
+	// manifest fetch and the on-demand JRE/jar downloads alike — in
+	// addition to it reaching the launched JVM via ${uri.token} as before.
 	manifestClient := proxydetect.Client(proxydetect.Result{Host: appValues.ProxyHost, Port: appValues.ProxyPort}, 10*time.Second)
 	fetchClient := proxydetect.Client(proxydetect.Result{Host: appValues.ProxyHost, Port: appValues.ProxyPort}, 5*time.Minute)
+	if token := uriParams["token"]; token != "" {
+		manifestClient = withBearerToken(manifestClient, token)
+		fetchClient = withBearerToken(fetchClient, token)
+	}
 
-	m, err := loadManifest(root, appValues.ManifestServerURL, manifestClient, logger)
+	m, err := loadManifest(root, manifestURL, manifestClient, logger)
 	if err != nil {
 		return fmt.Errorf("rigger: could not load application manifest: %w", err)
 	}
@@ -310,7 +402,7 @@ func loadManifest(root, bootstrapURL string, client *http.Client, logger *applog
 		fetchURL = cached.ManifestServerURL
 	}
 
-	fresh, fetchErr := fetchManifest(fetchURL, client)
+	fresh, fetchErr := manifest.Fetch(fetchURL, client)
 	if fetchErr == nil {
 		if err := writeManifestCache(cachePath, fresh); err != nil {
 			logger.Warn("rigger: warning: failed to update local manifest cache: %v", err)
@@ -326,23 +418,29 @@ func loadManifest(root, bootstrapURL string, client *http.Client, logger *applog
 	return nil, fmt.Errorf("fetching the manifest failed (%v) and no valid local cache exists (%v)", fetchErr, cacheErr)
 }
 
-func fetchManifest(url string, client *http.Client) (*manifest.Manifest, error) {
-	if url == "" {
-		return nil, fmt.Errorf("no manifest server URL available")
+// bearerTokenTransport injects an Authorization: Bearer header into every
+// request, wrapping whatever transport proxydetect.Client already built so
+// proxy routing is preserved (docs/REQUIREMENTS.md §27). Rigger still never
+// validates the token itself — that stays the server's job, per §10 Round 3.
+type bearerTokenTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *bearerTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(req)
+}
+
+// withBearerToken returns a client identical to client except every request
+// it sends also carries token as an Authorization: Bearer header.
+func withBearerToken(client *http.Client, token string) *http.Client {
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
 	}
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected HTTP status %s", resp.Status)
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	return manifest.Parse(data)
+	return &http.Client{Transport: &bearerTokenTransport{base: base, token: token}, Timeout: client.Timeout}
 }
 
 func writeManifestCache(path string, m *manifest.Manifest) error {

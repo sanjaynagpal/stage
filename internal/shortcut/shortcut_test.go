@@ -17,7 +17,8 @@ func wscriptShellReadBack(t *testing.T, path string) map[string]string {
 	script := `$s = (New-Object -COM WScript.Shell).CreateShortcut("` + path + `"); ` +
 		`Write-Output "TargetPath=$($s.TargetPath)"; ` +
 		`Write-Output "Description=$($s.Description)"; ` +
-		`Write-Output "IconLocation=$($s.IconLocation)"`
+		`Write-Output "IconLocation=$($s.IconLocation)"; ` +
+		`Write-Output "Arguments=$($s.Arguments)"`
 	out, err := exec.Command("powershell", "-NoProfile", "-Command", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("powershell readback: %v\n%s", err, out)
@@ -51,6 +52,7 @@ func TestCreateProducesAShortcutWScriptShellCanRead(t *testing.T) {
 		Description: "Launches ABC",
 		IconPath:    iconPath,
 		IconIndex:   0,
+		Arguments:   "start browser -url https://example.com/auth",
 	}
 	if err := Create(spec); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -69,6 +71,27 @@ func TestCreateProducesAShortcutWScriptShellCanRead(t *testing.T) {
 	wantIcon := iconPath + ",0"
 	if got["IconLocation"] != wantIcon {
 		t.Errorf("IconLocation = %q, want %q", got["IconLocation"], wantIcon)
+	}
+	if got["Arguments"] != spec.Arguments {
+		t.Errorf("Arguments = %q, want %q", got["Arguments"], spec.Arguments)
+	}
+}
+
+func TestCreateWithoutArgumentsLeavesArgumentsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	linkPath := filepath.Join(dir, "ABC.lnk")
+	targetPath := filepath.Join(dir, "rigger.exe")
+	if err := os.WriteFile(targetPath, []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Create(Spec{Path: linkPath, TargetPath: targetPath, Description: "d"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got := wscriptShellReadBack(t, linkPath)
+	if got["Arguments"] != "" {
+		t.Errorf("Arguments = %q, want empty", got["Arguments"])
 	}
 }
 

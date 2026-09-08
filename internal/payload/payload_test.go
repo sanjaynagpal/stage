@@ -10,7 +10,13 @@ import (
 
 func TestBuildMetaRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "build.json")
-	want := BuildMeta{Environment: manifest.EnvProd, NetworkZone: "Internet"}
+	want := BuildMeta{
+		Environment:       manifest.EnvProd,
+		NetworkZone:       "Internet",
+		ManifestServerURL: "https://example.com/abc/prod/internet/manifest.json",
+		ManifestBundled:   true,
+		AuthURL:           "https://example.com/abc/authentication.html",
+	}
 
 	if err := SaveBuildMeta(path, want); err != nil {
 		t.Fatalf("SaveBuildMeta: %v", err)

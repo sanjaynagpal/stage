@@ -150,34 +150,47 @@ func finishUninstall(root, appID string) error {
 	if record.StartMenuShortcut != "" {
 		if err := shortcut.Remove(record.StartMenuShortcut); err != nil {
 			warn("%v", err)
+		} else {
+			fmt.Println("Removed Start Menu shortcut:", record.StartMenuShortcut)
 		}
 	}
 	if record.DesktopShortcut != "" {
 		if err := shortcut.Remove(record.DesktopShortcut); err != nil {
 			warn("%v", err)
+		} else {
+			fmt.Println("Removed Desktop shortcut:", record.DesktopShortcut)
 		}
 	}
 	if record.ProtocolScheme != "" {
 		if err := protocolhandler.Unregister(appValues.InstallScope, record.ProtocolScheme); err != nil {
 			warn("%v", err)
+		} else {
+			fmt.Printf("Unregistered protocol handler: %s://\n", record.ProtocolScheme)
 		}
 	}
 	for _, fa := range record.FileAssociations {
 		if err := fileassoc.Unregister(appValues.InstallScope, fa.Extension, fa.ProgID); err != nil {
 			warn("%v", err)
+		} else {
+			fmt.Println("Unregistered file association:", fa.Extension)
 		}
 	}
 
 	if err := winreg.DeleteAppKey(appValues.InstallScope, appID); err != nil {
 		warn("%v", err)
+	} else {
+		fmt.Printf("Removed registry key: %s\\Software\\%s\n", hkeyName(appValues.InstallScope), appID)
 	}
 	if err := winreg.DeleteUninstallValues(appValues.InstallScope, appID); err != nil {
 		warn("%v", err)
+	} else {
+		fmt.Println("Removed Add/Remove Programs entry:", appID)
 	}
 
 	if err := removeDirWithRetry(root); err != nil {
 		return fmt.Errorf("unins: remove %s: %w", root, err)
 	}
+	fmt.Println("Removed install directory:", root)
 
 	// DataDir is always the current user's own profile regardless of
 	// InstallScope (layout.DataDir ignores scope) — for an AllUsers install
@@ -188,8 +201,11 @@ func finishUninstall(root, appID string) error {
 	// transient hold from something else (AV/indexing) rather than a real
 	// permission issue — a plain non-admin RemoveAll on the same path
 	// right afterward succeeded immediately.
-	if err := removeDirWithRetry(layout.DataDir(appID)); err != nil {
+	dataDir := layout.DataDir(appID)
+	if err := removeDirWithRetry(dataDir); err != nil {
 		warn("could not remove data directory: %v", err)
+	} else {
+		fmt.Println("Removed data directory:", dataDir)
 	}
 
 	// Best-effort: only the temp copy of unins.exe itself needs delayed
@@ -208,6 +224,16 @@ func finishUninstall(root, appID string) error {
 	}
 	console.ReadLine("\nPress Enter to exit... ")
 	return nil
+}
+
+// hkeyName names the registry hive a scope was written to, for display in
+// the removal trace only — winreg independently derives the same root key
+// from scope for the actual delete.
+func hkeyName(scope layout.Scope) string {
+	if scope == layout.ScopeAllUsers {
+		return "HKEY_LOCAL_MACHINE"
+	}
+	return "HKEY_CURRENT_USER"
 }
 
 // removeDirWithRetry retries os.RemoveAll briefly against path: the process

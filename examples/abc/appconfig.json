@@ -11,6 +11,12 @@
         "Internet": {
           "manifestPath": "manifest.generated.json",
           "manifestServerUrl": "http://127.0.0.1:8080/abc/manifest.json"
+        },
+        "Radianz": {
+          "manifestPath": "manifest.generated.json",
+          "manifestServerUrl": "http://127.0.0.1:8080/abc/manifest.json",
+          "fetchAtInstall": true,
+          "authUrl": "http://127.0.0.1:8080/abc/authentication.html"
         }
       }
     }

@@ -43,7 +43,8 @@ go vet ./...
 There is no separate lint config or Makefile — plain `go build`/`go test`/`go vet` is the whole
 workflow. Windows is a hard requirement: most packages call into `golang.org/x/sys/windows`
 (registry, elevation tokens, disk space, process enumeration, message boxes) and won't build on
-other GOOS values.
+other GOOS values. One test (`internal/winreg`'s HKLM write path) self-skips unless run elevated
+as admin — don't read that skip as a real failure.
 
 ## Architecture
 
@@ -137,6 +138,15 @@ distinguishes the two by checking the URI scheme against the app's own registere
 letter like `C:\...` parses as scheme `c`). Only params the manifest explicitly lists in
 `protocolParams` ever get substituted into the JVM invocation (§10-11) — allowlisting happens at
 `manifest.Resolve()` time, not in `uriparse` itself.
+
+For a zone built with `AuthURL` set (`appconfig.ZoneConfig.AuthURL`, §27), the shortcut targets a
+third path instead: `rigger.exe start browser -url <AuthURL>` opens the OS browser to an
+operator-hosted auth page and exits, and only that page's eventual redirect to the registered
+protocol scheme — carrying a token — actually launches the JVM. Whenever a launch carries a
+token (from that redirect, or from the manual/debug `rigger.exe start manifest -url <URL>` entry
+point), Rigger also attaches it as an `Authorization: Bearer` header on its own manifest and
+on-demand JRE/jar requests (`withBearerToken`, `cmd/rigger/main.go`), not just on the JVM args it
+already injected it into.
 
 ### Windows-native primitives, isolated per package
 

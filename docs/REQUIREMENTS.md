@@ -737,3 +737,89 @@ is resolved here.
   existing version), and self-heals on the next launch once the earlier temp process has fully
   exited. Given real version bumps happen far apart in practice, a randomized temp filename to
   close this narrow race wasn't judged worth the complexity for v1.
+
+## 26. Decisions (Round 15 — optional fetch-at-install manifest delivery) — CONFIRMED
+
+§9's "bundles rigger.exe + a JRE + a manifest JSON" decision assumed the bundled manifest is
+fine to run with until Rigger's own `ManifestServerUrl` polling (§9b) catches it up. That holds
+for apps whose manifest rarely changes, but not for one whose classpath/JVM options/shortcut
+metadata change often: `stagebuild` can run long before an end user actually runs the resulting
+installer, so the embedded snapshot can already be stale by install time, and it stays stale
+until the app's first launch triggers a refresh.
+
+- **Per-zone opt-in, not a global switch**: `appconfig.ZoneConfig` gains
+  `FetchAtInstall bool` (default `false`, fully backward compatible — no existing
+  `appconfig.json` needs to change). A zone that sets it true has `cmd/installer` fetch the live
+  manifest from `ManifestServerURL` at install time instead of reading an embedded copy.
+- **The build-time safety net still applies either way**: `ManifestPath` stays required and is
+  still loaded and validated by `stagebuild` even for a `FetchAtInstall` zone — `Manifest.
+  Validate()`'s placeholder checks (§5) catch a broken manifest before it ever ships, regardless
+  of whether that particular file is the one installed. What changes is only whether that
+  validated snapshot is *also* embedded into the payload.
+- **No new build-time mechanism for passing the URL through**: the installer needs to know
+  where to fetch from before it has any manifest at all, so `internal/payload.BuildMeta` (already
+  written by `stagebuild`, already read first thing by `cmd/installer`) gains
+  `ManifestServerURL` and `ManifestBundled` fields, populated for both delivery modes. This was
+  chosen over introducing `-ldflags -X` injection — nothing in this repo does build-time value
+  injection that way today (§25 explicitly rejected it for `rigger.exe` versioning too), and
+  `BuildMeta` is already exactly the "one thing this specific build needs to know that
+  `appconfig.json` alone doesn't tell it" mechanism.
+- **Reuses existing fetch/proxy machinery, doesn't duplicate it**: the HTTP-GET-and-parse
+  primitive is now `internal/manifest.Fetch`, exported from what was previously a private
+  function inside `cmd/rigger` (`fetchManifest`) so both `cmd/rigger`'s post-install polling and
+  `cmd/installer`'s install-time fetch call the same code. Proxy detection for the fetch reuses
+  `internal/proxydetect.DetectForURL`/`Client`, the same functions the installer already uses to
+  resolve the proxy it stores in the registry (§18).
+- **The reachability check *is* the fetch, not a separate probe**: doing a bare TCP/ping check
+  and then a second GET would double the network round trips for no real benefit — the same
+  principle `internal/doctor`'s `checkNetwork` already applies (§19-20b), where "GET + parses as
+  a valid manifest" *is* the reachability check.
+- **Accepted trade-off — no offline install path for `FetchAtInstall` zones**: §9b's "connectivity
+  is only required to check for updates, never to launch" guarantee depends on always having a
+  cached/bundled manifest to fall back to. A `FetchAtInstall` zone has no bundled copy, so an
+  install-time fetch failure has nothing to fall back to and must hard-fail the install cleanly
+  (nothing on disk touched yet — consistent with how a missing/corrupt *embedded* manifest
+  already fails today). This is judged acceptable because it's opt-in per zone: an app picks this
+  mode specifically because it values a fresh manifest over an offline-capable installer.
+
+## 27. Decisions (Round 16 — browser-first auth launch) — CONFIRMED
+
+§11/§17 originally imagined the token/auth flow as: the Java app is *already running*
+(launched normally from a shortcut) and *it* constructs an outbound authenticated request using
+`${networkZone}`. In practice, for a zone like `Internet`/`Radianz`, authentication has to
+happen *before* the app ever starts: the user clicks the shortcut, a browser opens to an
+operator-hosted auth page, and only on success does the auth server redirect the browser to this
+app's registered protocol scheme with a token — which is what should actually launch the JVM.
+This corrects that sequencing and closes two real gaps: nothing made the shortcut open a
+browser, and Rigger's own outbound requests never carried the token (only the launched JVM did).
+
+- **New per-zone `AuthURL`** (`appconfig.ZoneConfig.AuthURL`, optional): when set, `stagebuild`
+  records it in `BuildMeta.AuthURL`, and `cmd/installer` creates that zone's Start Menu/Desktop
+  shortcuts with `Arguments: "start browser -url <AuthURL>"` instead of launching directly. No
+  registry value is needed — the `.lnk`'s baked-in arguments are the only place this needs to
+  live. Empty (the default) leaves shortcuts launching directly, exactly as before this existed.
+  **Known, accepted limitation**: if the auth URL ever changes, existing shortcuts go stale until
+  reinstalled — nothing currently rewrites a shortcut post-install.
+- **Two new Rigger invocation modes**: `rigger.exe start browser -url <URL>` opens the OS
+  default browser at `<URL>` (via `rundll32 url.dll,FileProtocolHandler`, the standard way to do
+  this on Windows without shell-quoting pitfalls) and exits — no registry, manifest, or JVM
+  involved. `rigger.exe start manifest -url <URL>` is a manual/debug entry point, not invoked by
+  any shortcut: it treats `<URL>`'s own query string as `token`/other `${uri.X}` params (reusing
+  `internal/uriparse.Parse`, which parses any URL, not just custom schemes) and fetches the
+  manifest from `<URL>` itself.
+- **`start manifest -url` trusts its input; the protocol-handler path still doesn't**: because
+  `start manifest` only ever runs because a person deliberately typed the command, trusting its
+  `-url` as the literal fetch target is safe. The existing protocol-handler path (an
+  externally-redirected, less-trusted `acme-abc://...` URI) is unchanged in this respect — it
+  still only ever fetches from the registry's own `ManifestServerURL`, borrowing *only* the
+  token from the incoming URI. §18 Round 8's "no multi-zone lookup table" stands: the Network
+  Zone returned via the auth redirect remains a log-and-continue consistency check, never a
+  mechanism for picking which manifest URL to use.
+- **Rigger's own manifest/jar/JRE requests now carry the token**: when a launch has a token
+  (from either the protocol-handler path or `start manifest -url`), `manifestClient`/
+  `fetchClient` (`cmd/rigger/main.go`) are wrapped in a small `Authorization: Bearer <token>`
+  `http.RoundTripper` decorator (`withBearerToken`) before being used for the manifest fetch and
+  any on-demand JRE/jar downloads — in addition to, not instead of, the token still reaching the
+  launched JVM via `${uri.token}` exactly as before. §10 Round 3's "token trust: not Rigger's
+  job" still stands — Rigger only *carries* the token now on more of its own requests; validating
+  it is genuine/unexpired remains entirely the server side's responsibility.
